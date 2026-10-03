@@ -1,9 +1,10 @@
 """Shared Pydantic types used across Gatekeeper."""
 
-from datetime import UTC, datetime
+from datetime import datetime
 from enum import StrEnum
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -15,18 +16,22 @@ class GatekeeperModel(BaseModel):
 
 
 def new_id() -> str:
-    return uuid4().hex
+    return str(uuid4())
 
 
-def utc_now() -> datetime:
-    return datetime.now(UTC)
+EASTERN = ZoneInfo("America/New_York")
+
+
+def eastern_now() -> datetime:
+    return datetime.now(EASTERN)
 
 
 class ActionSource(StrEnum):
     """Where an action came from."""
 
     CLAUDE_HOOK = "claude_hook"
-    MCP = "mcp"
+    MCP_VSCODE = "mcp_vscode"
+    MCP_CODEX = "mcp_codex"
 
 
 class ActionKind(StrEnum):
@@ -67,7 +72,9 @@ class StandardAction(GatekeeperModel):
     sequence: int = Field(ge=0, description="Per-session action counter")
     source: ActionSource
     kind: ActionKind
-    tool_name: str = Field(description='Raw tool name from the agent( mcp tool, write, etc. )')
+    tool_name: str = Field(
+        description="Raw tool name from the agent( mcp tool, write, etc. )"
+    )
 
     command: str | None = None
     path: str | None = None
@@ -76,7 +83,7 @@ class StandardAction(GatekeeperModel):
     cwd: str
 
     raw: dict[str, Any] = Field(default_factory=dict, description="Original payload")
-    created_at: datetime = Field(default_factory=utc_now)
+    created_at: datetime = Field(default_factory=eastern_now)
 
 
 class ParsedCommand(GatekeeperModel):
@@ -103,6 +110,7 @@ class ParsedCommand(GatekeeperModel):
         description="Set when bashlex could not parse the command; treat as unknown",
     )
 
+
 class RuleResult(GatekeeperModel):
     """
     Sets a structured output for rules.py. Identifies what rules are being broken.
@@ -121,7 +129,8 @@ class RuleResult(GatekeeperModel):
         description="Set if a rule forces ALLOW or DENY without consulting the judge",
     )
     reasons: list[str] = Field(
-        default_factory=list, description="Human-readable explanations for matched rules"
+        default_factory=list,
+        description="Human-readable explanations for matched rules",
     )
 
 
@@ -143,7 +152,7 @@ class UntrustedRead(GatekeeperModel):
         default_factory=list,
         description="Hidden-instruction findings from scanner.py, empty if clean",
     )
-    created_at: datetime = Field(default_factory=utc_now)
+    created_at: datetime = Field(default_factory=eastern_now)
 
 
 class JudgeResult(GatekeeperModel):
@@ -154,9 +163,15 @@ class JudgeResult(GatekeeperModel):
     """
 
     risk: RiskLevel
-    score: float = Field(ge=0, le=1, description="0 is harmless, 1 is certainly malicious")
-    reasoning: str = Field(description="The judge's explanation, shown in gatekeeper show")
-    model: str = Field(description="Which LLM produced this, e.g. the GEMINI_MODEL value")
+    score: float = Field(
+        ge=0, le=1, description="0 is harmless, 1 is certainly malicious"
+    )
+    reasoning: str = Field(
+        description="The judge's explanation, shown in gatekeeper show"
+    )
+    model: str = Field(
+        description="Which LLM produced this, e.g. the GEMINI_MODEL value"
+    )
     latency_ms: int = Field(ge=0, description="How long the LLM call took")
     error: str | None = Field(
         default=None, description="Set if the judge call failed or timed out"
@@ -171,7 +186,8 @@ class SandboxReport(GatekeeperModel):
 
     image: str = Field(description="Docker image the command ran in")
     exit_code: int | None = Field(
-        default=None, description="None if the command never finished (timeout or error)"
+        default=None,
+        description="None if the command never finished (timeout or error)",
     )
     timed_out: bool = False
     duration_ms: int = Field(default=0, ge=0)
@@ -188,10 +204,9 @@ class SandboxReport(GatekeeperModel):
         description="Fake secrets (planted .env, AWS creds) that the command read or sent out",
     )
     error: str | None = Field(
-        default=None, description="Set if the sandbox itself failed (e.g. Docker unavailable)"
+        default=None,
+        description="Set if the sandbox itself failed (e.g. Docker unavailable)",
     )
-
-
 
 
 class Decision(GatekeeperModel):
@@ -206,7 +221,8 @@ class Decision(GatekeeperModel):
     action: StandardAction
     verdict: Verdict
     reasons: list[str] = Field(
-        default_factory=list, description="Why this verdict was chosen, in plain language"
+        default_factory=list,
+        description="Why this verdict was chosen, in plain language",
     )
 
     parsed: ParsedCommand | None = None
@@ -227,4 +243,4 @@ class Decision(GatekeeperModel):
     summary: str | None = Field(
         default=None, description="One-line summary shown in gatekeeper log"
     )
-    created_at: datetime = Field(default_factory=utc_now)
+    created_at: datetime = Field(default_factory=eastern_now)

@@ -32,18 +32,18 @@ def migrate(conn: sqlite3.Connection) -> None:
     Files are named NNNN_description.sql. The database's user_version holds the number
     of the last migration applied. Each migration and its version bump commit together.
     """
-    current = conn.execute("PRAGMA user_version").fetchone()[0]
-    files = sorted(
-        (f for f in MIGRATIONS.iterdir() if f.name.endswith(".sql")),
-        key=lambda f: f.name,
+    current_version = conn.execute("PRAGMA user_version").fetchone()[0]
+    migration_files = sorted(
+        (file for file in MIGRATIONS.iterdir() if file.name.endswith(".sql")),
+        key=lambda file: file.name,
     )
-    for f in files:
-        version = int(f.name.split("_", 1)[0])
-        if version <= current:
+    for file in migration_files:
+        version = int(file.name.split("_", 1)[0])
+        if version <= current_version:
             continue
         try:
             conn.executescript(
-                f"BEGIN;\n{f.read_text()}\nPRAGMA user_version={version};\nCOMMIT;"
+                f"BEGIN;\n{file.read_text()}\nPRAGMA user_version={version};\nCOMMIT;"
             )
         except Exception:
             if conn.in_transaction:
