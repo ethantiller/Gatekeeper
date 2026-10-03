@@ -51,6 +51,7 @@ gatekeeper/
 │       └── dev.py                  # gatekeeper sandbox-test, fun on|off (GK-4, GK-10)
 ├── docker/
 │   ├── base.Dockerfile             # base sandbox image (GK-2)
+│   ├── compose.yaml                # logger container, gk-sandbox network, image builds (GK-2)
 │   ├── tripwire_templates/         # fake secret file layouts (GK-2)
 │   │   ├── env.template
 │   │   └── aws_credentials.template
@@ -78,10 +79,10 @@ gatekeeper/
 ## Sandbox environment (GK-2)
 
 - **Base image**: `docker/base.Dockerfile`, Node 22 on Debian bookworm-slim with git, python3, uv, corepack, strace and a non-root `sandbox` user (uid 1000). Tripwire files are not baked in; they are planted per session at run time.
-- **Network** `gk-sandbox`: a Docker bridge network with `internal=True`, so containers on it have no route to the internet.
+- **Network** `gk-sandbox`: a Docker bridge network with `internal=True`, so containers on it have no route to the internet. Defined in `docker/compose.yaml`, which also defines the logger.
 - **Connection logger** `gk-connection-logger`: a mitmproxy container on that network. Sandbox containers send web traffic to it through `http_proxy`/`https_proxy` (see `proxy_environment()`). It logs every host, scans URLs, headers and bodies for tripwire values (raw, URL, hex, base64), answers 403 and never forwards anything.
 
-Build and start everything (idempotent; `status` and `down` work the same way):
+Build and start everything with `docker compose` (idempotent; `status` and `down` work the same way; add `--rebuild` after `up` to rebuild the images):
 
 ```
 uv run python -m gatekeeper.sandbox.environment up

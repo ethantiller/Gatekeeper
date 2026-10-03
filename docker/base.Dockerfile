@@ -7,15 +7,16 @@ RUN apt-get update \
 
 # uv so repo images can run `uv sync`; corepack for pnpm and yarn.
 COPY --from=ghcr.io/astral-sh/uv:0.11.8 /uv /uvx /usr/local/bin/
-RUN corepack enable
 
-# The node image already has uid 1000 as "node": rename it instead of adding a second user.
-RUN groupmod -n sandbox node \
-    && usermod -l sandbox -d /home/sandbox -m node \
+# Enable Corepack, then rename the default non-root user to sandbox_user.
+# Then set /home/sandbox as the home directory for the new user.
+RUN corepack enable \
+    && groupmod -n sandbox_user node \
+    && usermod -l sandbox_user -d /home/sandbox -m node \
     && mkdir -p /workspace \
-    && chown sandbox:sandbox /workspace
+    && chown sandbox_user:sandbox_user /workspace
 
 # Tripwire files are NOT baked in: values are per session and planted at run time.
 WORKDIR /workspace
-USER sandbox
+USER sandbox_user
 CMD ["sleep", "infinity"]
