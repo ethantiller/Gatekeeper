@@ -8,17 +8,17 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
-    "anthropic>=1.11.0",
     "bashlex>=0.18",
     "docker>=7.2.0",
     "fastapi>=0.142.2",
     "fastmcp>=4.0.10",
+    "google-genai>=2.28.0",
     "httpx>=0.28.1",
     "pydantic>=2.13.5",
     "pyyaml>=6.0.3",
     "typer>=0.27.2",
     "uvicorn[standard]>=0.54.0",
-    "websockets>=17.2",
+    "websockets>=13,<17",
 ]
 
 [build-system]
