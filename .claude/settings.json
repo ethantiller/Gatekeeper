@@ -1,0 +1,51 @@
+{
+	"permissions": {
+		"ask": [
+			"Bash(echo gatekeeper-approval-probe)"
+		]
+	},
+	"hooks": {
+		"SessionStart": [
+			{
+				"hooks": [
+					{
+						"type": "command",
+						"command": "curl.exe --silent --show-error --max-time 5 --request POST --header \"Content-Type: application/json\" --data-binary \"@-\" http://127.0.0.1:8765/hooks"
+					}
+				]
+			}
+		],
+		"UserPromptSubmit": [
+			{
+				"hooks": [
+					{
+						"type": "command",
+						"command": "curl.exe --silent --show-error --max-time 5 --request POST --header \"Content-Type: application/json\" --data-binary \"@-\" http://127.0.0.1:8765/hooks"
+					}
+				]
+			}
+		],
+		"PreToolUse": [
+			{
+				"matcher": "^(Bash|Write|Edit|Read|WebFetch|mcp__gatekeeper__fixture_echo)$",
+				"hooks": [
+					{
+						"type": "command",
+						"command": "curl.exe --silent --show-error --max-time 5 --request POST --header \"Content-Type: application/json\" --data-binary \"@-\" http://127.0.0.1:8765/hooks"
+					}
+				]
+			}
+		],
+		"PostToolUse": [
+			{
+				"matcher": "^(Bash|Write|Edit|Read|WebFetch|mcp__gatekeeper__fixture_echo)$",
+				"hooks": [
+					{
+						"type": "command",
+						"command": "curl.exe --silent --show-error --max-time 5 --request POST --header \"Content-Type: application/json\" --data-binary \"@-\" http://127.0.0.1:8765/hooks"
+					}
+				]
+			}
+		]
+	}
+}
