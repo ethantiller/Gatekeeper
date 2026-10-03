@@ -1,0 +1,61 @@
+{
+  "description": "Capture Codex lifecycle payloads for Gatekeeper fixture testing.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "^(startup|resume|clear|compact)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl --silent --show-error --max-time 5 --request POST --header \"Content-Type: application/json\" --data-binary @- http://127.0.0.1:8765/hooks/codex",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl --silent --show-error --max-time 5 --request POST --header \"Content-Type: application/json\" --data-binary @- http://127.0.0.1:8765/hooks/codex",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl --silent --show-error --max-time 5 --request POST --header \"Content-Type: application/json\" --data-binary @- http://127.0.0.1:8765/hooks/codex",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl --silent --show-error --max-time 5 --request POST --header \"Content-Type: application/json\" --data-binary @- http://127.0.0.1:8765/hooks/codex",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl --silent --show-error --max-time 5 --request POST --header \"Content-Type: application/json\" --data-binary @- http://127.0.0.1:8765/hooks/codex",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
