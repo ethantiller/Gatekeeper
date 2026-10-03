@@ -10,7 +10,20 @@
 				"hooks": [
 					{
 						"type": "command",
-						"command": "curl.exe --silent --show-error --max-time 5 --request POST --header \"Content-Type: application/json\" --data-binary \"@-\" http://127.0.0.1:8765/hooks"
+						"command": "curl",
+						"args": [
+							"--silent",
+							"--show-error",
+							"--max-time",
+							"5",
+							"--request",
+							"POST",
+							"--header",
+							"Content-Type: application/json",
+							"--data-binary",
+							"@-",
+							"http://127.0.0.1:8765/hooks"
+						]
 					}
 				]
 			}
@@ -20,7 +33,20 @@
 				"hooks": [
 					{
 						"type": "command",
-						"command": "curl.exe --silent --show-error --max-time 5 --request POST --header \"Content-Type: application/json\" --data-binary \"@-\" http://127.0.0.1:8765/hooks"
+						"command": "curl",
+						"args": [
+							"--silent",
+							"--show-error",
+							"--max-time",
+							"5",
+							"--request",
+							"POST",
+							"--header",
+							"Content-Type: application/json",
+							"--data-binary",
+							"@-",
+							"http://127.0.0.1:8765/hooks"
+						]
 					}
 				]
 			}
@@ -31,7 +57,20 @@
 				"hooks": [
 					{
 						"type": "command",
-						"command": "curl.exe --silent --show-error --max-time 5 --request POST --header \"Content-Type: application/json\" --data-binary \"@-\" http://127.0.0.1:8765/hooks"
+						"command": "curl",
+						"args": [
+							"--silent",
+							"--show-error",
+							"--max-time",
+							"5",
+							"--request",
+							"POST",
+							"--header",
+							"Content-Type: application/json",
+							"--data-binary",
+							"@-",
+							"http://127.0.0.1:8765/hooks"
+						]
 					}
 				]
 			}
@@ -42,7 +81,20 @@
 				"hooks": [
 					{
 						"type": "command",
-						"command": "curl.exe --silent --show-error --max-time 5 --request POST --header \"Content-Type: application/json\" --data-binary \"@-\" http://127.0.0.1:8765/hooks"
+						"command": "curl",
+						"args": [
+							"--silent",
+							"--show-error",
+							"--max-time",
+							"5",
+							"--request",
+							"POST",
+							"--header",
+							"Content-Type: application/json",
+							"--data-binary",
+							"@-",
+							"http://127.0.0.1:8765/hooks"
+						]
 					}
 				]
 			}
