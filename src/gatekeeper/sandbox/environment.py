@@ -172,25 +172,25 @@ def ca_certificate_archive() -> bytes:
     return _tar_single_file("etc/gatekeeper/ca.pem", certificate, mode=0o644)
 
 
-def _registry_filename(session_id: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_-]", "_", session_id) + ".json"
+def _registry_filename(session_label: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_-]", "_", session_label) + ".json"
 
 
-def register_session(session_id: str, seed: str) -> None:
+def register_tripwires(session_label: str, seed: str) -> None:
     """Tell the logger which tripwire values to watch for in this session."""
     from gatekeeper.sandbox.tripwires import registry_entry
 
     _require_logger_running()
     archive = _tar_single_file(
-        _registry_filename(session_id), registry_entry(session_id, seed), mode=0o644
+        _registry_filename(session_label), registry_entry(session_label, seed), mode=0o644
     )
     run_docker("cp", "-", f"{LOGGER_NAME}:{REGISTRY_DIR}", input=archive)
 
 
-def unregister_session(session_id: str) -> None:
+def unregister_tripwires(session_label: str) -> None:
     """Stop watching for this session's values. Does nothing if the logger is gone."""
     run_docker(
-        "exec", LOGGER_NAME, "rm", "-f", f"{REGISTRY_DIR}/{_registry_filename(session_id)}",
+        "exec", LOGGER_NAME, "rm", "-f", f"{REGISTRY_DIR}/{_registry_filename(session_label)}",
         check=False,
     )
 
