@@ -23,13 +23,17 @@ def load_rules(repo_path: str | Path | None = None) -> dict[str, Any]:
 
 
 def _read_rules(path: Path) -> dict[str, Any]:
-    with path.open(encoding="utf-8") as rules_file:
-        rules = yaml.safe_load(rules_file)
+    try:
+        with path.open(encoding="utf-8") as rules_file:
+            rules = yaml.safe_load(rules_file)
 
-    if rules is None:
-        return {}
-    if not isinstance(rules, dict):
-        raise TypeError(f"Rules file must contain a YAML mapping: {path}")
+        if not rules:
+            raise ValueError(f"Rules file is cannot be empty: {path}")
+        if not isinstance(rules, dict):
+            raise TypeError(f"Rules file must contain a YAML mapping: {path}")
+    except Exception as e:
+        raise RuntimeError(f"Failed to read rules from {path}") from e
+    
     return rules
 
 
