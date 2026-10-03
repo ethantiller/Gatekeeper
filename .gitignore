@@ -10,3 +10,7 @@ dist/
 .github/agents/
 /AGENTS.md
 /fixtures/claude/*.json
+/fixtures/mcp/*.json
+/fixtures/codex/*.json
+/fixtures/fixture_server.py
+/tests/
