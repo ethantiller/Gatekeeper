@@ -27,6 +27,16 @@ class FixtureRequestHandler(BaseHTTPRequestHandler):
         self.fixture_root = Path(fixture_root)
         super().__init__(*args, **kwargs)
 
+    def do_GET(self) -> None:
+        if self.path == "/mcp":
+            self.send_response(405)
+            self.send_header("Allow", "POST")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+
+        self._respond_json({"error": "not found"}, 404)
+
     def do_POST(self) -> None:
         if self.path not in {"/hooks", "/mcp"}:
             self._respond_json({"error": "not found"}, 404)

@@ -5,6 +5,7 @@ import unittest
 from functools import partial
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from fixtures.fixture_server import FixtureRequestHandler
@@ -68,6 +69,15 @@ class FixtureServerTests(unittest.TestCase):
         saved = list((Path(self.temp_dir.name) / "mcp").glob("initialize-*.json"))
         self.assertEqual(len(saved), 1)
         self.assertEqual(json.loads(saved[0].read_text(encoding="utf-8")), payload)
+
+    def test_mcp_get_reports_post_only_transport(self) -> None:
+        request = Request(f"{self.url}/mcp", method="GET")
+
+        with self.assertRaises(HTTPError) as error:
+            urlopen(request)
+
+        self.assertEqual(error.exception.code, 405)
+        self.assertEqual(error.exception.headers["Allow"], "POST")
 
     def test_fixture_echo_is_listed_and_called(self) -> None:
         status, response = self.post("/mcp", {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})

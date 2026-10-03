@@ -3,7 +3,7 @@
 Start the local capture server before opening either client:
 
 ```powershell
-python fixtures/fixture_server.py
+uv run --no-sync python fixtures/fixture_server.py
 ```
 
 The server requires Python 3.12 or later and binds to loopback only. Claude hook requests are saved as raw JSON in `fixtures/claude/`; MCP initialization and tool-call requests are saved in `fixtures/mcp/`. The MCP server exposes one harmless `fixture_echo` tool for verifying the connection.
