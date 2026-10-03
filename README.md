@@ -41,6 +41,7 @@ gatekeeper/
 │   ├── sandbox/
 │   │   ├── repo_images.py          # builds and caches repo images (GK-4)
 │   │   ├── runner.py               # runs a command in a container (GK-4)
+│   │   ├── environment.py          # builds/manages base image, network, logger (GK-2)
 │   │   └── tripwires.py            # per-session fake secret values (GK-2)
 │   └── cli/
 │       ├── main.py                 # gatekeeper command entry point (GK-1)
@@ -50,8 +51,13 @@ gatekeeper/
 │       └── dev.py                  # gatekeeper sandbox-test, fun on|off (GK-4, GK-10)
 ├── docker/
 │   ├── base.Dockerfile             # base sandbox image (GK-2)
-│   ├── tripwire_templates/         # fake .env and AWS credentials layout (GK-2)
+│   ├── tripwire_templates/         # fake secret file layouts (GK-2)
+│   │   ├── env.template
+│   │   └── aws_credentials.template
 │   └── connection_logger/          # proxy that logs attempted hosts (GK-2)
+│       ├── Dockerfile
+│       ├── logger.py               # mitmproxy addon
+│       └── tripwire_match.py       # tripwire matching helpers
 ├── rules/rules.yaml                # default rules file (GK-1)
 ├── plugin/
 │   ├── .claude-plugin/plugin.json  # Claude Code plugin manifest (GK-6)
@@ -63,6 +69,34 @@ gatekeeper/
 │   ├── red_team.py                 # attacker LLM loop (GK-9)
 │   └── results/                    # results.json + summary.md (GK-9)
 └── tests/
+    ├── test_tripwires.py           # tripwire values, archive, matching (GK-2)
+    ├── test_sandbox_network.py     # needs Docker (GK-2)
     ├── fixtures/claude_hooks/      # real hook payloads (GK-3)
     └── fixtures/mcp/               # real MCP payloads (GK-3)
 ```
+
+## Sandbox environment (GK-2)
+
+- **Base image**: `docker/base.Dockerfile`, Node 22 on Debian bookworm-slim with git, python3, uv, corepack, strace and a non-root `sandbox` user (uid 1000). Tripwire files are not baked in; they are planted per session at run time.
+- **Network** `gk-sandbox`: a Docker bridge network with `internal=True`, so containers on it have no route to the internet.
+- **Connection logger** `gk-connection-logger`: a mitmproxy container on that network. Sandbox containers send web traffic to it through `http_proxy`/`https_proxy` (see `proxy_environment()`). It logs every host, scans URLs, headers and bodies for tripwire values (raw, URL, hex, base64), answers 403 and never forwards anything.
+
+Build and start everything (idempotent; `status` and `down` work the same way):
+
+```
+uv run python -m gatekeeper.sandbox.environment up
+```
+
+Each request produces one stdout line in the logger:
+
+```
+GK_CONN {"time": "<UTC ISO 8601>", "client_ip": "...", "scheme": "http|https", "method": "...", "host": "...", "port": 80, "path": "<first 200 chars>", "body_bytes": 0, "tripwire_hits": [{"session_id": "...", "name": "...", "form": "raw|url|hex|base64|base64url", "location": "url|header|body"}], "blocked": true}
+```
+
+TLS handshakes the client rejects are logged with `"tls_failed": true`. `GK_READY` is printed once the proxy listens.
+
+Tests: `uv run pytest`. `tests/test_sandbox_network.py` needs a running Docker daemon and is skipped with a reason otherwise.
+
+**HTTPS interception works.** Sandbox containers trust the logger's CA (copied in with `ca_certificate_archive()`), so decrypted HTTPS requests are logged and scanned like HTTP. The CA is regenerated if the logger container is recreated, so copy it into each new sandbox container.
+
+**strace** works as user `sandbox` with `cap_drop=["ALL"]` and no extra capabilities (tested on Docker 29.4.1).
