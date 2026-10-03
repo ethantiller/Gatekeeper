@@ -12,10 +12,12 @@ gatekeeper/
 ├── README.md
 ├── .github/workflows/ci.yml        # lint + tests on every push (GK-1)
 ├── src/gatekeeper/
-│   ├── types.py                    # shared Pydantic types (GK-1)
 │   ├── config.py                   # reads ~/.gatekeeper/config.toml (GK-1)
-│   ├── database.py                 # SQLite connection and tables (GK-1)
+│   ├── database.py                 # SQLite connection, WAL mode, runs migrations (GK-1)
+│   ├── migrations/
+│   │   └── 0001_initial.sql        # the five tables: sessions, prompts, untrusted_reads, decisions, checkpoints (GK-1)
 │   ├── server/
+│   │   ├── types.py                # shared Pydantic types (GK-1)
 │   │   ├── main.py                 # server startup and route mounting (GK-1)
 │   │   ├── auth.py                 # X-Gatekeeper-Token check (GK-1)
 │   │   ├── hook_routes.py          # /hooks/session-start, prompt, before-tool, after-tool (GK-6)
@@ -41,6 +43,7 @@ gatekeeper/
 │   ├── sandbox/
 │   │   ├── repo_images.py          # builds and caches repo images (GK-4)
 │   │   ├── runner.py               # runs a command in a container (GK-4)
+│   │   ├── environment.py          # builds/manages base image, network, logger (GK-2)
 │   │   └── tripwires.py            # per-session fake secret values (GK-2)
 │   └── cli/
 │       ├── main.py                 # gatekeeper command entry point (GK-1)
@@ -50,8 +53,14 @@ gatekeeper/
 │       └── dev.py                  # gatekeeper sandbox-test, fun on|off (GK-4, GK-10)
 ├── docker/
 │   ├── base.Dockerfile             # base sandbox image (GK-2)
-│   ├── tripwire_templates/         # fake .env and AWS credentials layout (GK-2)
+│   ├── compose.yaml                # logger container, gk-sandbox network, image builds (GK-2)
+│   ├── tripwire_templates/         # fake secret file layouts (GK-2)
+│   │   ├── env.template
+│   │   └── aws_credentials.template
 │   └── connection_logger/          # proxy that logs attempted hosts (GK-2)
+│       ├── Dockerfile
+│       ├── logger.py               # mitmproxy addon
+│       └── tripwire_match.py       # tripwire matching helpers
 ├── rules/rules.yaml                # default rules file (GK-1)
 ├── plugin/
 │   ├── .claude-plugin/plugin.json  # Claude Code plugin manifest (GK-6)
@@ -63,6 +72,77 @@ gatekeeper/
 │   ├── red_team.py                 # attacker LLM loop (GK-9)
 │   └── results/                    # results.json + summary.md (GK-9)
 └── tests/
+    ├── test_tripwires.py           # tripwire values, archive, matching (GK-2)
+    ├── test_sandbox_network.py     # needs Docker (GK-2)
     ├── fixtures/claude_hooks/      # real hook payloads (GK-3)
     └── fixtures/mcp/               # real MCP payloads (GK-3)
 ```
+
+## Sandbox environment (GK-2)
+
+- **Base image**: `docker/base.Dockerfile`, Node 22 on Debian bookworm-slim with git, python3, uv, corepack, strace and a non-root `sandbox` user (uid 1000). Tripwire files are not baked in; they are planted per session at run time.
+- **Network** `gk-sandbox`: a Docker bridge network with `internal=True`, so containers on it have no route to the internet. Defined in `docker/compose.yaml`, which also defines the logger.
+- **Connection logger** `gk-connection-logger`: a mitmproxy container on that network. Sandbox containers send web traffic to it through `http_proxy`/`https_proxy` (see `proxy_environment()`). It logs every host, scans URLs, headers and bodies for tripwire values (raw, URL, hex, base64), answers 403 and never forwards anything.
+
+Build and start everything with `docker compose` (idempotent; `status` and `down` work the same way; add `--rebuild` after `up` to rebuild the images):
+
+```
+uv run python -m gatekeeper.sandbox.environment up
+```
+
+Each request produces one stdout line in the logger:
+
+```
+GK_CONN {"time": "<UTC ISO 8601>", "client_ip": "...", "scheme": "http|https", "method": "...", "host": "...", "port": 80, "path": "<first 200 chars>", "body_bytes": 0, "tripwire_hits": [{"session_id": "...", "name": "...", "form": "raw|url|hex|base64|base64url", "location": "url|header|body"}], "blocked": true}
+```
+
+TLS handshakes the client rejects are logged with `"tls_failed": true`. `GK_READY` is printed once the proxy listens.
+
+Tests: `uv run pytest`. `tests/test_sandbox_network.py` needs a running Docker daemon and is skipped with a reason otherwise.
+
+**HTTPS interception works.** Sandbox containers trust the logger's CA (copied in with `ca_certificate_archive()`), so decrypted HTTPS requests are logged and scanned like HTTP. The CA is regenerated if the logger container is recreated, so copy it into each new sandbox container.
+
+**strace** works as user `sandbox` with `cap_drop=["ALL"]` and no extra capabilities (tested on Docker 29.4.1).
+
+## Shared types
+
+All shared Pydantic types live in `src/gatekeeper/server/types.py`. Every pipeline stage passes these around instead of raw dicts.
+
+| Type | What it holds |
+|---|---|
+| `StandardAction` | One tool call from an agent, normalized. The rest of the system never sees raw hook or MCP payloads. |
+| `ParsedCommand` | A shell command broken into programs, arguments, pipes, and redirects (bashlex). |
+| `RuleResult` | Which rules matched, their tags, and an optional forced verdict. |
+| `UntrustedRead` | Content the agent read but did not write (a URL, a cloned file). Used to catch prompt injection. |
+| `JudgeResult` | The LLM's risk rating and reasoning. |
+| `SandboxReport` | What a command did in the container: files changed, hosts contacted, tripwires triggered. |
+| `Decision` | The final verdict for one action, embedding every stage's output above. |
+
+Conventions:
+
+- **Unknown fields are errors.** All types inherit `GatekeeperModel` (`extra="forbid"`), so a typo like `comand=` fails instead of being silently dropped.
+- **Stages fail softly.** `JudgeResult` and `SandboxReport` have an `error` field, and `Decision` allows any stage to be `None`, so a failed stage can still be recorded.
+- **IDs** are UUID strings with dashes, for example `4f28bfba-6756-418b-88d6-19cc02569654` (`str(uuid4())`).
+- **Timestamps** are timezone-aware US Eastern (`America/New_York`). They follow daylight saving: UTC-5 in winter (EST), UTC-4 in summer (EDT).
+- **Enums** (`ActionSource`, `ActionKind`, `Verdict`, `RiskLevel`) serialize as plain lowercase strings.
+- **Action sources** are `claude_hook`, `mcp_vscode`, and `mcp_codex`.
+
+## Database
+
+Gatekeeper stores sessions, prompts, untrusted reads, decisions, and checkpoints in SQLite. `connect()` in `src/gatekeeper/database.py` opens it and sets everything up.
+
+- **Location:** `~/.gatekeeper/gatekeeper.db` by default. Set the `GATEKEEPER_DB` environment variable to use a different file (useful for testing without touching your real data).
+- **WAL mode**, so the server can write decisions while `gatekeeper log` reads them. Foreign keys are on, and a busy database is waited on for up to 5 seconds.
+- **Nested objects are stored as JSON text** (for example `decisions.decision_json` holds a whole `Decision`). Only the columns used for sorting and filtering get their own column.
+
+### Migrations
+
+The table definitions live in numbered SQL files in `src/gatekeeper/migrations/`, not in Python code.
+
+- On every `connect()`, Gatekeeper reads the database's `user_version` number and runs any migration file with a higher number, in order. A new database starts at 0 and runs them all.
+- Each migration and its version bump run in one transaction. If the SQL fails partway, nothing is applied.
+- Files are named `NNNN_description.sql`, for example `0001_initial.sql`.
+
+To change the schema, add a new file such as `0002_add_something.sql`. **Never edit a migration that has already been merged**, because databases that already ran it won't run it again. If two branches add the same number, rename one before merging.
+
+Teammates don't share a database file. Everyone builds their own from the same migration files when they first run Gatekeeper.

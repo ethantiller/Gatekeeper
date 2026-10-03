@@ -1,0 +1,157 @@
+# Gatekeeper default rules
+# Copied to ~/.gatekeeper/rules.yaml by `gatekeeper init`.
+# A repo can add its own .gatekeeper.yaml: lists are appended to defaults,
+# and scalar values replace the default values.
+version: 1
+
+# What hooks do when the Gatekeeper server cannot be reached.
+failure_mode: block_risky
+judge_failure_verdict: ask
+untrusted_lookback_actions: 8
+max_deleted_files_before_asking: 20
+sandbox_timeout_seconds: 30
+approval_timeout_seconds: 300
+
+# Denied immediately, without the judge or sandbox.
+never_allowed:
+  - id: delete-root-or-home
+    reason: Recursive delete of the filesystem root or your home folder
+    pattern: 'rm\s+(-\S*[rR]\S*\s+)+(/|~|\$HOME)/?(\s|$)'
+  - id: wipe-disk
+    reason: Formats or overwrites a disk
+    programs: [mkfs, dd, shred, wipefs, diskutil eraseDisk]
+  - id: fork-bomb
+    reason: Spawns processes until the machine locks up
+    pattern: ':\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:'
+  - id: open-everything
+    reason: Makes every file on the system writable by anyone
+    pattern: 'chmod\s+-R\s+777\s+/(\s|$)'
+  - id: stop-gatekeeper
+    reason: The agent is trying to turn off the thing watching it
+    pattern: '(launchctl\s+(unload|bootout|stop).*gatekeeper|systemctl\s+(--user\s+)?(stop|disable|mask)\s+gatekeeper|pkill.*gatekeeper|killall.*gatekeeper)'
+  - id: force-push-main
+    reason: Rewrites history on the main branch
+    pattern: 'git\s+push\s+.*(-f|--force)(\s|$).*\b(main|master)\b'
+
+# Allowed silently only when every program is listed and no tag applies.
+# An entry with a subcommand, such as "git status", matches only that subcommand.
+safe_commands:
+  - ls
+  - pwd
+  - cat
+  - head
+  - tail
+  - wc
+  - echo
+  - grep
+  - rg
+  - find # find -delete or -exec still gets tagged
+  - tree
+  - which
+  - diff
+  - sort
+  - uniq
+  - git status
+  - git diff
+  - git log
+  - git show
+  - git branch
+  - git rev-parse
+  - node --version
+  - python --version
+  - npm --version
+
+# Hosts that do not trigger an unknown-host finding. Access still gets a network tag.
+allowed_hosts:
+  - registry.npmjs.org
+  - pypi.org
+  - files.pythonhosted.org
+  - github.com
+  - api.github.com
+  - codeload.github.com
+  - objects.githubusercontent.com
+
+# Reads or writes here add the touches_secrets tag.
+protected_files:
+  - "**/.env"
+  - "**/.env.*"
+  - "**/*.pem"
+  - "**/*.key"
+  - "**/id_rsa*"
+  - "**/id_ed25519*"
+  - "~/.ssh/**"
+  - "~/.aws/**"
+  - "~/.config/gcloud/**"
+  - "~/.docker/config.json"
+  - "~/.npmrc"
+  - "~/.pypirc"
+  - "~/.netrc"
+  - "~/.gatekeeper/**"
+
+# Writes here add the edits_agent_config tag.
+agent_config_paths:
+  - ".claude/**"
+  - "~/.claude/**"
+  - ".mcp.json"
+  - ".vscode/**"
+  - "~/.codex/**"
+  - ".git/hooks/**"
+  - ".husky/**"
+  - ".github/workflows/**"
+  - ".gatekeeper.yaml"
+
+# Matching any configured condition sends the action to review.
+tags:
+  network:
+    programs: [curl, wget, nc, ncat, telnet, ssh, scp, sftp, rsync, ftp]
+    commands: [git push, git fetch, git pull, git clone]
+  deletes_files:
+    programs: [rm, rmdir, unlink]
+    commands: [git clean, git reset --hard, git checkout --, git restore]
+    flags:
+      find: [-delete]
+      rsync: [--delete]
+  installs_packages:
+    commands:
+      - npm install
+      - npm i
+      - npm ci
+      - pnpm add
+      - pnpm install
+      - yarn add
+      - yarn install
+      - pip install
+      - uv add
+      - uv pip install
+      - cargo add
+      - cargo install
+      - go install
+      - brew install
+      - apt install
+      - apt-get install
+  runs_new_code:
+    # Also applies to scripts or binaries created or changed during this session.
+    programs: [npx, uvx, bunx, make]
+    flags:
+      find: [-exec, -execdir]
+  changes_permissions:
+    programs: [chmod, chown, chgrp]
+  uses_sudo:
+    programs: [sudo, su, doas]
+
+# Added by the parser, not configurable here:
+# obfuscated, unparseable, touches_secrets, edits_agent_config
+
+# Tags that also trigger a sandbox run; other tags go to the judge only.
+sandbox_tags:
+  - network
+  - deletes_files
+  - installs_packages
+  - runs_new_code
+  - obfuscated
+  - unparseable
+  - touches_secrets
+
+useless_mode:
+  enabled: false
+  persona: "a disappointed senior engineer who has seen this exact mistake before"
