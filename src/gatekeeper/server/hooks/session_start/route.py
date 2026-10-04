@@ -44,7 +44,7 @@ async def session_start(
     )
     repo_root = ensure_session(conn, payload.session_id, payload.cwd, client.source)
     if is_new and client == HookClient.CLAUDE:  # resumed and compacted chats already exist
-        sounds.announce_new_session()
+        sounds.announce_new_session(conn, payload.session_id)
     # On a thread: finding the build plan asks git and Docker, which must not delay the reply.
     threading.Thread(target=_start_image_build, args=(Path(repo_root),), daemon=True).start()
     return {

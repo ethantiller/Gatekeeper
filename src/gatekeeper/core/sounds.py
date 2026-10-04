@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 ASSETS = resources.files("gatekeeper") / "assets" / "brainrot"
 MUTE_ENV = "GATEKEEPER_MUTE"
-STARTUP_SOUND = "session_start"  # not in SOUNDS: the model never picks it, and it is not tied to useless mode
+STARTUP_SOUND = "session_start"  # not in SOUNDS, so the model never picks it
 PROMPT_CHARACTER_LIMIT = 1_000
 RESPONSE_CHARACTER_LIMIT = 2_000
 
@@ -137,8 +137,10 @@ def react_in_background(
     task.add_done_callback(_background_tasks.discard)
 
 
-def announce_new_session() -> None:
-    """Play the startup sound for a new chat. It plays whether or not useless mode is on."""
+def announce_new_session(conn: sqlite3.Connection, session_id: str) -> None:
+    """Play the startup sound for a new chat when useless mode is on for it."""
+    if not useless_mode.state(conn, session_id, useless_mode.session_config(conn, session_id))[0]:
+        return
     try:
         play(STARTUP_SOUND)
     except OSError:
