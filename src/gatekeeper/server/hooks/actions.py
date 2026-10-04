@@ -7,11 +7,13 @@ from typing import Any
 from uuid import UUID, uuid5
 
 from gatekeeper.server.hooks.client import HookClient
+from gatekeeper.server.hooks.codex_patch import patch_text, split_patch
 from gatekeeper.server.hooks.payload import HookPayload
 from gatekeeper.server.types import ActionKind, StandardAction
 
 # Fixed so the same session and tool_use_id always give the same action id.
 ACTION_ID_NAMESPACE = UUID("6f1d3c52-8a0e-4b8e-9d55-2f4c1a7e9b30")
+MAX_DIFF_CHARACTERS = 200_000  # difflib is slow on huge inputs, and the judge reads 2,000
 SHELL_PROGRAMS = {"bash", "sh", "zsh"}
 SHELL_SCRIPT_FLAGS = {"-c", "-lc"}
 
@@ -24,24 +26,58 @@ class ToolPayload(HookPayload):
     tool_use_id: str
 
 
-def action_id_for(session_id: str, tool_use_id: str) -> str:
-    """The action id for one tool call, so a hook retry and the after-tool hook find its decision."""
-    return str(uuid5(ACTION_ID_NAMESPACE, f"{session_id}:{tool_use_id}"))
+def action_id_for(session_id: str, tool_use_id: str, file_path: str = "") -> str:
+    """The action id for one tool call, so a hook retry and the after-tool hook find its decision.
+
+    A patch that touches several files has one action per file, told apart by the path.
+    """
+    return str(uuid5(ACTION_ID_NAMESPACE, f"{session_id}:{tool_use_id}:{file_path}"))
 
 
 def to_actions(client: HookClient, payload: ToolPayload, sequence: int) -> list[StandardAction]:
-    """The actions one tool call performs. A Codex patch can touch several files (GK-6d)."""
-    action = StandardAction(
-        action_id=action_id_for(payload.session_id, payload.tool_use_id),
+    """The actions one tool call performs. A Codex patch has one write per file it touches."""
+    if payload.tool_name == "apply_patch":
+        return _patch_actions(client, payload, sequence)
+    return [_action(client, payload, sequence, **_action_fields(payload.tool_name, payload.tool_input, payload.cwd))]
+
+
+def _action(
+    client: HookClient, payload: ToolPayload, sequence: int, file_path: str = "", **fields: Any
+) -> StandardAction:
+    for name in ("command", "path", "content", "url"):
+        if fields.get(name) is not None and not isinstance(fields[name], str):
+            fields[name] = str(fields[name])
+    return StandardAction(
+        action_id=action_id_for(payload.session_id, payload.tool_use_id, file_path),
         session_id=payload.session_id,
         sequence=sequence,
         source=client.source,
         tool_name=payload.tool_name,
         cwd=payload.cwd,
         raw=payload.model_dump(),
-        **_action_fields(payload.tool_name, payload.tool_input, payload.cwd),
+        **fields,
     )
-    return [action]
+
+
+def _patch_actions(client: HookClient, payload: ToolPayload, sequence: int) -> list[StandardAction]:
+    """One write_file action per file in the patch, each with only its own diff."""
+    text = patch_text(payload.tool_input)
+    files = split_patch(text) if text else []
+    if not files:
+        # Unreadable patch: kind `other` with the raw text, so the judge still sees what it is.
+        return [_action(client, payload, sequence, kind=ActionKind.OTHER, content=text)]
+    actions = []
+    for file_patch in files:
+        # A move also writes the destination, so both paths are checked.
+        for path in (file_patch.path, file_patch.moved_to):
+            if path:
+                actions.append(
+                    _action(
+                        client, payload, sequence, path,
+                        kind=ActionKind.WRITE_FILE, path=path, content=file_patch.diff,
+                    )
+                )
+    return actions
 
 
 def _action_fields(tool_name: str, tool_input: dict[str, Any], cwd: str) -> dict[str, Any]:
@@ -97,7 +133,11 @@ def _current_text(path: Path | None) -> str:
     if path is None:
         return ""
     try:
-        return path.read_text(encoding="utf-8", errors="replace")
+        # A FIFO or device such as /dev/zero would block or fill memory when read.
+        if not path.is_file():
+            return ""
+        with path.open(encoding="utf-8", errors="replace") as file:
+            return file.read(MAX_DIFF_CHARACTERS)
     except OSError:
         # Missing or unreadable: the whole new text shows as added, which hides nothing.
         return ""
@@ -123,8 +163,8 @@ def _unified_diff(before: str, after: str, path: Path | None) -> str:
     name = str(path) if path else "file"
     return "".join(
         difflib.unified_diff(
-            before.splitlines(keepends=True),
-            after.splitlines(keepends=True),
+            before[:MAX_DIFF_CHARACTERS].splitlines(keepends=True),
+            after[:MAX_DIFF_CHARACTERS].splitlines(keepends=True),
             fromfile=f"a/{name}",
             tofile=f"b/{name}",
         )

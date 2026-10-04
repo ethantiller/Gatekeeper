@@ -1,6 +1,7 @@
 """Runs every pipeline step for one action and returns the saved Decision."""
 
 import asyncio
+import logging
 import sqlite3
 from pathlib import Path
 from typing import Any, Protocol
@@ -11,7 +12,7 @@ from gatekeeper.core import decision_store
 from gatekeeper.pipeline import judge
 from gatekeeper.pipeline.combine import combine, serious_tags
 from gatekeeper.pipeline.parser import parse
-from gatekeeper.pipeline.rules import check_action_against_rules, load_rules
+from gatekeeper.pipeline.rules import check_action_against_rules, load_default_rules, load_rules
 from gatekeeper.sandbox import runner
 from gatekeeper.server.types import (
     ActionKind,
@@ -24,6 +25,8 @@ from gatekeeper.server.types import (
     UntrustedRead,
     Verdict,
 )
+
+logger = logging.getLogger(__name__)
 
 # An untagged command with one of these judge ratings is sandboxed before it is decided.
 SANDBOX_ESCALATION_RISKS = {RiskLevel.MEDIUM, RiskLevel.HIGH}
@@ -65,7 +68,13 @@ async def decide(
             return decision_store.record_approval(conn, existing.decision_id)
         return existing
 
-    config = load_rules(session.repo_root)
+    try:
+        config = load_rules(session.repo_root)
+    except (RuntimeError, TypeError, ValueError) as error:
+        # A repo's .gatekeeper.yaml is untrusted and can only add checks, so a broken one is
+        # ignored rather than failing every tool call in that repo.
+        logger.warning("Ignoring the rules file in %s: %s", session.repo_root, error)
+        config = load_default_rules()
     parsed = parse(action)
     rules = check_action_against_rules(action, parsed, config, session.repo_root)
     reads = recent_untrusted_reads(session.session_id, action.sequence)

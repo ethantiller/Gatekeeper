@@ -1,10 +1,13 @@
 """Saves decisions to SQLite with a git checkpoint, a user summary and an agent reason."""
 
+import logging
 import sqlite3
 from pathlib import Path
 
-from gatekeeper.core.checkpoints import create_checkpoint
+from gatekeeper.core.checkpoints import CheckpointError, create_checkpoint
 from gatekeeper.server.types import ActionKind, Decision, Verdict, eastern_now, new_id
+
+logger = logging.getLogger(__name__)
 
 CHECKPOINT_KINDS = {ActionKind.RUN_COMMAND, ActionKind.WRITE_FILE}
 SUMMARY_TARGET_LIMIT = 80
@@ -14,12 +17,19 @@ def save(conn: sqlite3.Connection, decision: Decision, repo_root: Path) -> Decis
     """Write the decision row and, for actions that will change files, a checkpoint.
 
     Fills in `summary`, `agent_reason` and `checkpoint_id` and returns the saved copy.
-    The checkpoint is taken first, so a git failure raises before anything is written.
+    If git cannot take the checkpoint (an unreadable file, a lock), the decision is still saved
+    without one and says so; rolling that action back is then not possible.
     """
     checkpoint_id = new_id()
     checkpoint_sha = None
     if decision.verdict != Verdict.DENY and decision.action.kind in CHECKPOINT_KINDS:
-        checkpoint_sha = create_checkpoint(repo_root, checkpoint_id)
+        try:
+            checkpoint_sha = create_checkpoint(repo_root, checkpoint_id)
+        except CheckpointError as error:
+            logger.warning("No checkpoint for %s: %s", decision.action.action_id, error)
+            decision = decision.model_copy(
+                update={"reasons": [*decision.reasons, "No rollback checkpoint could be taken"]}
+            )
 
     saved = decision.model_copy(
         update={

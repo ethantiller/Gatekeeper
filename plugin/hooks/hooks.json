@@ -1,0 +1,51 @@
+{
+  "description": "Send Claude Code sessions, prompts and tool calls to the local Gatekeeper server. PreToolUse fails closed: if the server is down or errors, the tool call is denied.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl --silent --show-error --fail --max-time 8 --request POST --header \"Content-Type: application/json\" --header \"X-Gatekeeper-Token: $(cat ~/.gatekeeper/token)\" --data-binary @- http://127.0.0.1:8787/hooks/claude/session-start || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl --silent --show-error --fail --max-time 8 --request POST --header \"Content-Type: application/json\" --header \"X-Gatekeeper-Token: $(cat ~/.gatekeeper/token)\" --data-binary @- http://127.0.0.1:8787/hooks/claude/prompt || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "^(Bash|Write|Edit|MultiEdit|NotebookEdit|Read|WebFetch|mcp__.*)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl --silent --show-error --fail --max-time 85 --request POST --header \"Content-Type: application/json\" --header \"X-Gatekeeper-Token: $(cat ~/.gatekeeper/token)\" --data-binary @- http://127.0.0.1:8787/hooks/claude/before-tool || echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"Gatekeeper server is not reachable, so this action was blocked. Ask the user to start it with: uv run python -m gatekeeper.server.main\"}}'",
+            "timeout": 90
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^(Bash|Write|Edit|MultiEdit|NotebookEdit|Read|WebFetch|mcp__.*)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "curl --silent --show-error --fail --max-time 8 --request POST --header \"Content-Type: application/json\" --header \"X-Gatekeeper-Token: $(cat ~/.gatekeeper/token)\" --data-binary @- http://127.0.0.1:8787/hooks/claude/after-tool || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

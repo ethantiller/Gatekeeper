@@ -14,6 +14,22 @@ from gatekeeper.server.types import ParsedCommand, StandardAction
 _REDIRECT_OUTPUT_TYPES = {">", ">>", ">|", "&>", "&>>"}
 _FILE_REDIRECT_TYPES = {"<", "<>", *_REDIRECT_OUTPUT_TYPES}
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+# Programs that only run the command after them, so the rules must look at that command instead.
+# `rtk` is the user's output-condensing proxy, which prefixes every command (and `rtk proxy`).
+TRANSPARENT_WRAPPERS = {"rtk", "env", "time", "nohup", "command", "exec"}
+
+# What bashlex raises on bad or hostile input. Besides its own errors it can fail with
+# RecursionError, IndexError, AttributeError and TypeError (a bug in ParsingError itself).
+BASHLEX_FAILURES = (
+    bashlex.errors.ParsingError,
+    bashlex.tokenizer.MatchedPairError,
+    NotImplementedError,
+    RecursionError,
+    IndexError,
+    AttributeError,
+    TypeError,
+    ValueError,
+)
 
 
 @dataclass
@@ -33,28 +49,22 @@ def parse(action: StandardAction) -> ParsedCommand:
     if not raw.strip():
         return result
 
-    try:
-        roots = bashlex.parse(raw)
-    except (
-        bashlex.errors.ParsingError,
-        bashlex.tokenizer.MatchedPairError,
-        NotImplementedError,
-    ) as error:
-        return result.model_copy(update={"parse_error": str(error)})
-
     state = _ParseState()
-    for node in _walk_ast_nodes(roots):
-        kind = getattr(node, "kind", None)
-        if kind == "command":
-            _handle_command(node, state)
-        elif kind == "pipe":
-            _handle_pipe(state)
-        elif kind == "compound":
-            _handle_compound(node, state)
-        elif kind == "commandsubstitution":
-            _handle_command_substitution(state)
-        elif kind == "redirect":
-            _handle_redirect(node, state)
+    try:
+        for node in _walk_ast_nodes(bashlex.parse(raw)):
+            kind = getattr(node, "kind", None)
+            if kind == "command":
+                _handle_command(node, state)
+            elif kind == "pipe":
+                _handle_pipe(state)
+            elif kind == "compound":
+                _handle_compound(node, state)
+            elif kind == "commandsubstitution":
+                _handle_command_substitution(state)
+            elif kind == "redirect":
+                _handle_redirect(node, state)
+    except BASHLEX_FAILURES as error:
+        return result.model_copy(update={"parse_error": f"{type(error).__name__}: {error}"})
 
     return ParsedCommand(
         raw=raw,
@@ -114,7 +124,7 @@ def extract_pipeline_commands(raw: str) -> list[list[list[str]]]:
 
     try:
         roots = bashlex.parse(raw)
-    except (bashlex.errors.ParsingError, bashlex.tokenizer.MatchedPairError, NotImplementedError):
+    except BASHLEX_FAILURES:
         return []
 
     pipelines: list[list[list[str]]] = []
@@ -138,7 +148,7 @@ def extract_redirect_paths(raw: str) -> list[str]:
 
     try:
         roots = bashlex.parse(raw)
-    except (bashlex.errors.ParsingError, bashlex.tokenizer.MatchedPairError, NotImplementedError):
+    except BASHLEX_FAILURES:
         return []
 
     paths: list[str] = []
@@ -155,7 +165,30 @@ def extract_redirect_paths(raw: str) -> list[str]:
 
 def _command_arguments(node: Any) -> list[str]:
     words = [part for part in getattr(node, "parts", ()) if getattr(part, "kind", None) == "word"]
-    return [str(word.word) for word in words]
+    return _unwrap_wrappers([str(word.word) for word in words])
+
+
+def _unwrap_wrappers(argv: list[str]) -> list[str]:
+    """`rtk git status` -> `git status`, so tags and the safe list see the real program.
+
+    Without this, `rtk rm -rf x` is just the program `rtk`: no tag, no sandbox run, and
+    `rtk git status` never matches the safe list. argv is returned unchanged if no wrapper leads it.
+    """
+    index = 0
+    unwrapped = False
+    while True:
+        while index < len(argv) and _ASSIGNMENT.match(argv[index]):
+            index += 1
+        if index >= len(argv) or _normalize_program(argv[index]) not in TRANSPARENT_WRAPPERS:
+            break
+        wrapper = _normalize_program(argv[index])
+        index += 1
+        if wrapper == "rtk" and index < len(argv) and argv[index] == "proxy":
+            index += 1
+        while index < len(argv) and argv[index].startswith("-"):
+            index += 1  # the wrapper's own flags, such as env -i
+        unwrapped = True
+    return argv[index:] if unwrapped and index < len(argv) else argv
 
 
 # Extract HTTP(S) hostnames from a parsed command or a direct URL action.

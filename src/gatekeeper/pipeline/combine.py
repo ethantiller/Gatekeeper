@@ -123,16 +123,16 @@ def _reasons_to_ask(
         reasons.append("The agent read untrusted content earlier, and this action is tagged serious")
 
     if sandbox is not None:
-        reasons.extend(_sandbox_concerns(action, sandbox, config, notes_matter=bool(serious)))
+        reasons.extend(_sandbox_concerns(action, sandbox, config))
     return reasons
 
 
 def _sandbox_concerns(
-    action: StandardAction, sandbox: SandboxReport, config: dict[str, Any], notes_matter: bool
+    action: StandardAction, sandbox: SandboxReport, config: dict[str, Any]
 ) -> list[str]:
-    """What the sandbox found. Its notes (missing repo image, host paths it could not copy,
-    ...) only mean incomplete evidence, which matters for serious actions but not for the
-    ones that are allowed without any sandbox run."""
+    """What the sandbox found. `sandbox.notes` (no repo image, host paths it could not copy, ...)
+    are left to the judge, which reads them in `describe_sandbox`; they say the evidence is
+    incomplete, not that the action did anything."""
     if sandbox.error is not None:
         return [f"The sandbox could not run this: {sandbox.error}"]
 
@@ -157,8 +157,6 @@ def _sandbox_concerns(
     if sensitive:
         concerns.append(f"It changes protected or agent config files: {', '.join(sensitive[:5])}")
 
-    if sandbox.notes and notes_matter:
-        concerns.append(f"The sandbox report has limits: {'; '.join(sandbox.notes)}")
     return concerns
 
 

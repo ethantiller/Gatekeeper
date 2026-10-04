@@ -39,9 +39,14 @@ REPOSITORY_OVERRIDE_KEYS = {
 }
 
 
+def load_default_rules() -> dict[str, Any]:
+    """The built-in rules, without any repository file."""
+    return _read_rule_config(DEFAULT_RULES_PATH)
+
+
 def load_rules(repo_path: str | Path | None = None) -> dict[str, Any]:
     """Load default rules and overlay a repository's optional rule file."""
-    defaults = _read_rule_config(DEFAULT_RULES_PATH)
+    defaults = load_default_rules()
     repository = Path.cwd() if repo_path is None else Path(repo_path)
     override_path = repository / REPOSITORY_RULES_NAME
 
@@ -504,7 +509,10 @@ def _normalize_path(path: str) -> str:
     home = str(Path.home()).replace("\\", "/")
     expanded = path.replace("${HOME}", home).replace("$HOME", home)
     if expanded.startswith("~"):
-        expanded = str(Path(expanded).expanduser())
+        try:
+            expanded = str(Path(expanded).expanduser())
+        except RuntimeError:
+            pass  # ~nosuchuser: no such home folder, so it stays a plain relative name
     return expanded.replace("\\", "/")
 
 
