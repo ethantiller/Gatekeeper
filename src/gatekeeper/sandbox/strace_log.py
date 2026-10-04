@@ -4,10 +4,28 @@ The log comes from `strace -f -y`, so every successful open ends with the resolv
 (`= 3</workspace/.env>`), whatever the working directory or relative path was.
 """
 
+import posixpath
 import re
 from dataclasses import dataclass
 
-TRACED_SYSCALLS = "openat,openat2,connect,unlinkat,renameat,renameat2"
+# Syscalls that take (dirfd, path) pairs, and which pairs they change. symlinkat's only pair is
+# the link being created; linkat's second pair is the new name; rename changes both names.
+CHANGED_PAIR_INDEXES: dict[str, tuple[int, ...]] = {
+    "unlinkat": (0,),
+    "renameat": (0, 1),
+    "renameat2": (0, 1),
+    "mkdirat": (0,),
+    "fchmodat": (0,),
+    "fchownat": (0,),
+    "utimensat": (0,),
+    "mknodat": (0,),
+    "linkat": (1,),
+    "symlinkat": (0,),
+}
+# These take a plain path with no dirfd, so only an absolute path can be classified.
+PATH_ONLY_SYSCALLS = ("truncate", "setxattr")
+TRACED_CHANGE_SYSCALLS = (*CHANGED_PAIR_INDEXES, *PATH_ONLY_SYSCALLS)
+TRACED_SYSCALLS = ",".join(("openat", "openat2", "connect", *TRACED_CHANGE_SYSCALLS))
 SANDBOX_HOME = "/home/sandbox"
 DNS_ADDRESS = ("127.0.0.11", 53)  # Docker's embedded DNS
 MAX_REPORTED_PATHS = 10
@@ -16,11 +34,12 @@ WRITE_FLAGS = ("O_WRONLY", "O_RDWR", "O_CREAT", "O_TRUNC", "O_APPEND")
 # Writes here are the command's normal business, not something outside the repo.
 EXPECTED_WRITE_PREFIXES = ("/workspace/", "/tmp/", "/proc/", "/dev/", "/sys/")
 OPEN_SYSCALLS = ("openat", "openat2")
-CHANGE_SYSCALLS = ("unlinkat", "renameat", "renameat2")
 
 _SYSCALL_PATTERN = re.compile(r"^(?:\d+\s+)?(?:<\.\.\. (\w+) resumed>|(\w+)\()")
 _RESULT_PATTERN = re.compile(r"\)\s+=\s+(-?\d+)(?:<([^>]*)>)?(?:\s+([A-Z][A-Z0-9]+))?")
 _QUOTED_PATTERN = re.compile(r'"((?:[^"\\]|\\.)*)"')
+# `AT_FDCWD</home/sandbox>, "victim"`: with -y the directory is spelled out after the dirfd.
+_DIRFD_PAIR_PATTERN = re.compile(r'(?:AT_FDCWD|\d+)(?:<([^>]*)>)?,\s*"((?:[^"\\]|\\.)*)"')
 _FLAGS_PATTERN = re.compile(r'"(?:[^"\\]|\\.)*",\s*([A-Z_0-9|]+)')
 _OPENAT2_FLAGS_PATTERN = re.compile(r"flags=([A-Z_0-9|]+)")
 _IPV4_PATTERN = re.compile(r'sin_port=htons\((\d+)\), sin_addr=inet_addr\("([\d.]+)"\)')
@@ -52,6 +71,31 @@ def _open_flags(syscall: str, line: str) -> str:
     pattern = _OPENAT2_FLAGS_PATTERN if syscall == "openat2" else _FLAGS_PATTERN
     match = pattern.search(line)
     return match.group(1) if match else ""
+
+
+def _resolve(directory: str | None, path: str) -> str | None:
+    """An absolute path, resolved against the call's directory if it was relative, else None."""
+    if path.startswith("/"):
+        return posixpath.normpath(path)
+    return posixpath.normpath(posixpath.join(directory, path)) if directory else None
+
+
+def _changed_paths(syscall: str, line: str, opened_path: str | None) -> list[str]:
+    """Absolute paths this call changes (or tried to change); empty if it only reads."""
+    pairs = [(match.group(1), match.group(2)) for match in _DIRFD_PAIR_PATTERN.finditer(line)]
+    if syscall in OPEN_SYSCALLS:
+        if not any(flag in _open_flags(syscall, line) for flag in WRITE_FLAGS):
+            return []
+        # A successful open already carries the resolved path; a failed one is resolved here.
+        resolved = [opened_path] if opened_path else [_resolve(*pairs[0])] if pairs else []
+    elif syscall in CHANGED_PAIR_INDEXES:
+        resolved = [_resolve(*pairs[index]) for index in CHANGED_PAIR_INDEXES[syscall] if index < len(pairs)]
+    elif syscall in PATH_ONLY_SYSCALLS:
+        quoted = _QUOTED_PATTERN.findall(line)
+        resolved = [_resolve(None, quoted[0])] if quoted else []
+    else:
+        return []
+    return [path for path in resolved if path]
 
 
 def _addresses(line: str) -> list[tuple[str, int]]:
@@ -100,17 +144,7 @@ def parse_strace_log(log: str, proxy_addresses: set[tuple[str, int]]) -> StraceF
         # Only complete calls carry their arguments; a resumed call has just the result.
         if called_name is None:
             continue
-        paths = _QUOTED_PATTERN.findall(line)
-        if syscall in OPEN_SYSCALLS:
-            changes_something = any(flag in _open_flags(syscall, line) for flag in WRITE_FLAGS)
-            paths = [resolved] if changes_something and resolved else paths[:1]
-        elif syscall not in CHANGE_SYSCALLS:
-            continue
-        else:
-            changes_something = True
-        if not changes_something:
-            continue
-        for path in paths:
+        for path in _changed_paths(syscall, line, resolved if result is not None and result >= 0 else None):
             if result is not None and result >= 0 and _is_outside_repo(path):
                 outside_writes.append(_collapse(path))
             elif errno_name == "ENOENT" and _is_outside_repo(path):

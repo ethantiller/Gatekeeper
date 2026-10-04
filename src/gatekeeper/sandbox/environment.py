@@ -80,7 +80,7 @@ class EnvironmentStatus:
     base_image_present: bool = False
     network_present: bool = False
     network_internal: bool = False
-    logger_state: str = "missing"  # missing | running | <other Docker state>
+    logger_state: str = "missing"  # missing | running | starting | unhealthy | <other Docker state>
 
     @property
     def ok(self) -> bool:
@@ -270,8 +270,18 @@ def _read_status(client: docker.DockerClient) -> EnvironmentStatus:
         base_image_present=_find_image_id(client, BASE_IMAGE_TAG) is not None,
         network_present=network is not None,
         network_internal=network is not None and bool(network.attrs.get("Internal")),
-        logger_state=logger.status if logger is not None else "missing",
+        logger_state=_logger_state(logger),
     )
+
+
+def _logger_state(logger: Container | None) -> str:
+    """"running" only if the logger is also healthy: a running but broken logger records nothing."""
+    if logger is None:
+        return "missing"
+    if logger.status != "running":
+        return logger.status
+    health = logger.attrs["State"].get("Health", {}).get("Status")
+    return "running" if health in (None, "healthy") else health
 
 
 def teardown_environment() -> None:

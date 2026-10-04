@@ -78,3 +78,40 @@ def test_dns_without_the_proxy_is_visible() -> None:
 
     assert findings.used_dns
     assert not findings.used_proxy
+
+
+def test_relative_paths_resolve_against_the_call_directory() -> None:
+    findings = _parse(
+        '1 unlinkat(AT_FDCWD</home/sandbox>, "victim", 0) = 0',
+        '2 unlinkat(AT_FDCWD</home/sandbox>, "missing", 0) = -1 ENOENT (No such file)',
+        '3 unlinkat(AT_FDCWD</workspace>, "inside.txt", 0) = 0',
+        '4 openat(AT_FDCWD</home/sandbox>, "gone", O_WRONLY|O_CREAT, 0666) = -1 ENOENT (No such file)',
+    )
+
+    assert findings.outside_writes == ["/home/sandbox/victim"]
+    assert findings.failed_changes == ["/home/sandbox/missing", "/home/sandbox/gone"]
+
+
+def test_directory_link_and_attribute_changes_are_seen() -> None:
+    findings = _parse(
+        '1 mkdirat(AT_FDCWD</home/sandbox>, "x", 0777) = 0',
+        '2 symlinkat("/etc/passwd", AT_FDCWD</home/sandbox>, "link") = 0',
+        '3 linkat(AT_FDCWD</workspace>, "a", AT_FDCWD</home/sandbox>, "hard", 0) = 0',
+        '4 fchmodat(AT_FDCWD</>, "/etc/hosts", 0777) = 0',
+        '5 truncate("/home/sandbox/.bashrc", 0) = 0',
+        '6 truncate("relative", 0) = 0',
+    )
+
+    assert findings.outside_writes == [
+        "/home/sandbox/x", "/home/sandbox/link", "/home/sandbox/hard", "/etc/hosts",
+        "/home/sandbox/.bashrc",
+    ]
+
+
+def test_rename_changes_both_names() -> None:
+    findings = _parse(
+        '1 renameat2(AT_FDCWD</workspace>, "f", AT_FDCWD</etc>, "g", RENAME_NOREPLACE) = 0',
+        '2 renameat2(AT_FDCWD</home/sandbox>, "old", AT_FDCWD</workspace>, "new", 0) = 0',
+    )
+
+    assert findings.outside_writes == ["/etc/g", "/home/sandbox/old"]

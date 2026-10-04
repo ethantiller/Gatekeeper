@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import IO
 from uuid import uuid4
 
+from docker.api.client import APIClient
 from docker.client import DockerClient
 from docker.errors import APIError, ImageNotFound, NotFound
 from docker.models.containers import Container
@@ -34,6 +35,7 @@ from gatekeeper.sandbox.environment import (
     unregister_tripwires,
 )
 from gatekeeper.sandbox.strace_log import (
+    TRACED_CHANGE_SYSCALLS,
     TRACED_SYSCALLS,
     StraceFindings,
     parse_strace_log,
@@ -55,6 +57,7 @@ HARD_DEADLINE_SECONDS = RUN_TIMEOUT_SECONDS + KILL_GRACE_SECONDS + 5
 POLL_SECONDS = 0.02
 ORPHAN_CHECK_AFTER_SECONDS = 1.0
 ORPHAN_POLL_SECONDS = 0.25
+ORPHAN_GRACE_SECONDS = 3.0  # strace may still be writing a big trace after the command ends
 OUTPUT_TAIL_BYTES = 4096
 REDACTION_MARGIN_BYTES = 128  # read a little extra so a secret cut by the tail is still redacted
 MAX_FILE_SIZE_KIB = 262144  # per file the command writes; stops one command filling the disk
@@ -62,7 +65,8 @@ CPU_LIMIT_NANO_CPUS = 1_000_000_000
 MEMORY_LIMIT = "1g"
 PIDS_LIMIT = 256
 STRACE_LOG_PATH = "/tmp/gk-strace.log"
-RUN_MARKER_PATH = "/tmp/gk-run-marker"
+INODE_PATH = "/tmp/gk-strace-inode"  # which file strace was given, to notice a swap
+STRACE_TEXT_MAX_BYTES = 32 * 1024**2  # most trace lines read back; the rest is counted, not read
 EXIT_CODE_PATH = "/tmp/gk-exit"
 STDOUT_PATH = "/tmp/gk-stdout"
 STDERR_PATH = "/tmp/gk-stderr"
@@ -80,13 +84,17 @@ DIFF_DELETED = 2
 
 TRIPWIRE_PATHS = (WORKSPACE_ENV_PATH, AWS_CREDENTIALS_PATH)
 SYSTEM_PROGRAM_DIRECTORIES = ("/bin", "/sbin", "/usr/bin", "/usr/sbin", "/usr/local/bin")
+# Redirect targets and the like (`> /dev/null`) are not host files the command could damage.
+NOISE_HOST_PREFIXES = ("/dev/", "/proc/", "/sys/")
 
 # The agent's command comes in through $GK_COMMAND so it never needs shell quoting. `timeout`
 # is outside `strace` because strace waits for background processes the command leaves behind;
 # the exit status goes to a file because that is the only reliable sign the command finished.
 COMMAND_VARIABLE = "GK_COMMAND"
 _INNER_SCRIPT = (
-    f'ulimit -f {MAX_FILE_SIZE_KIB}; bash -c "${COMMAND_VARIABLE}"; echo $? >{EXIT_CODE_PATH}'
+    f"stat -c %i {STRACE_LOG_PATH} >{INODE_PATH}; "
+    f'ulimit -f {MAX_FILE_SIZE_KIB}; bash -c "${COMMAND_VARIABLE}"; '
+    f"status=$?; echo $status >{EXIT_CODE_PATH}; exit $status"  # strace then reports the same code
 )
 WRAPPER_SCRIPT = (
     f"timeout --kill-after={KILL_GRACE_SECONDS} {RUN_TIMEOUT_SECONDS} "
@@ -274,6 +282,7 @@ class _CommandResult:
     ended_abnormally: bool  # no exit status recorded, but not a timeout (killed, or strace failed)
     left_processes: bool  # the command finished but background processes were still running
     disk_limit_hit: bool = False  # stopped for writing more than DISK_LIMIT_BYTES
+    tracer_stopped: bool = False  # strace ended before the command did (it was probably killed)
 
 
 @dataclass(frozen=True)
@@ -287,7 +296,9 @@ class _RunObservation:
     files_created: list[str]
     files_modified: list[str]
     files_deleted: list[str]
-    strace_log: str
+    strace_log: str  # only the lines that matter (see _read_strace_text), not the whole trace
+    strace_truncated: bool
+    evidence_problems: list[str]
 
 
 @dataclass(frozen=True)
@@ -308,7 +319,8 @@ def _observe_run(
 ) -> _RunObservation:
     """Run the command under strace and collect the file changes around it."""
     files_before = _workspace_diff(container)
-    _run_checked(container, ["touch", RUN_MARKER_PATH])
+    # The container's clock, not a file the command could touch: ctime cannot be set by a user.
+    started_epoch = _run_checked(container, ["date", "+%s.%N"]).decode().strip()
 
     start = time.monotonic()
     result = _exec_traced(client, container, command, workdir)
@@ -321,15 +333,18 @@ def _observe_run(
     deleted_after = _paths_of_kind(files_after, DIFF_DELETED)
     files_created = sorted(added_after - added_before)
     tail_bytes = OUTPUT_TAIL_BYTES + REDACTION_MARGIN_BYTES
+    strace_log, strace_truncated = _read_strace_text(container)
     return _RunObservation(
         result=result,
         stdout=_read_tail(container, STDOUT_PATH, tail_bytes),
         stderr=_read_tail(container, STDERR_PATH, tail_bytes),
         duration_ms=duration_ms,
         files_created=files_created,
-        files_modified=_modified_files(container, set(files_created)),
+        files_modified=_modified_files(container, set(files_created), started_epoch),
         files_deleted=sorted((added_before - added_after) | (deleted_after - deleted_before)),
-        strace_log=_read_tail(container, STRACE_LOG_PATH, None).decode(errors="replace"),
+        strace_log=strace_log,
+        strace_truncated=strace_truncated,
+        evidence_problems=_evidence_problems(container),
     )
 
 
@@ -363,6 +378,17 @@ def _run_warnings(evidence: _RunEvidence) -> list[str]:
         warnings.append("Background processes were still running when the command finished.")
     if result.ended_abnormally:
         warnings.append("The command ended without recording an exit status (it was killed).")
+    warnings += evidence.observation.evidence_problems
+    if evidence.observation.strace_truncated:
+        warnings.append(
+            f"The trace was larger than {STRACE_TEXT_MAX_BYTES // 1024**2} MiB, so later file "
+            "changes and connections may be missing from this report."
+        )
+    if result.tracer_stopped:
+        warnings.append(
+            "strace stopped before the command ended (it was probably killed), so later file "
+            "and network activity is unknown."
+        )
     if result.disk_limit_hit:
         warnings.append(
             f"The command was stopped after writing more than {DISK_LIMIT_BYTES // 1024**2} MiB."
@@ -426,7 +452,7 @@ def _host_path_warnings(
         try:
             relative = resolved.relative_to(root).as_posix()
         except ValueError:
-            if not str(resolved).startswith(SYSTEM_PROGRAM_DIRECTORIES):
+            if not str(resolved).startswith(SYSTEM_PROGRAM_DIRECTORIES + NOISE_HOST_PREFIXES):
                 warnings.append(
                     f"{token} is a host path outside the repo; the sandbox has no copy of it, "
                     "so what the command does to it is not shown."
@@ -532,13 +558,22 @@ def _exec_traced(
                 container.exec_run(KILL_ALL_COMMAND)
                 return _CommandResult(None, False, False, False, disk_limit_hit=True)
         if elapsed >= ORPHAN_CHECK_AFTER_SECONDS and _read_exit_code(container) is not None:
-            left_processes = True
+            wrapper_exit_code = _wait_for_wrapper(api, exec_id)
+            left_processes = wrapper_exit_code is None
             break
         time.sleep(POLL_SECONDS if elapsed < ORPHAN_CHECK_AFTER_SECONDS else ORPHAN_POLL_SECONDS)
 
     command_exit_code = _read_exit_code(container)
+    if left_processes or command_exit_code is None:
+        # strace detaches from its tracees when it is stopped, so nothing else ends them, and the
+        # snapshot taken next must not race with a command that is still changing files.
+        container.exec_run(KILL_ALL_COMMAND)
     if command_exit_code is not None:
-        return _CommandResult(command_exit_code, False, False, left_processes)
+        # strace passes the command's exit code through, so any other code means strace stopped.
+        tracer_stopped = wrapper_exit_code is not None and wrapper_exit_code != command_exit_code
+        return _CommandResult(
+            command_exit_code, False, False, left_processes, tracer_stopped=tracer_stopped
+        )
     killed = wrapper_exit_code in KILLED_EXIT_CODES and elapsed >= RUN_TIMEOUT_SECONDS
     timed_out = hit_deadline or killed
     return _CommandResult(
@@ -547,6 +582,17 @@ def _exec_traced(
         ended_abnormally=not timed_out,
         left_processes=False,
     )
+
+
+def _wait_for_wrapper(api: APIClient, exec_id: str) -> int | None:
+    """The wrapper's exit code once it ends, or None if it is still running after the grace."""
+    deadline = time.monotonic() + ORPHAN_GRACE_SECONDS
+    while time.monotonic() < deadline:
+        info = api.exec_inspect(exec_id)
+        if not info["Running"]:
+            return info["ExitCode"]
+        time.sleep(POLL_SECONDS)
+    return None
 
 
 def _writable_layer_bytes(client: DockerClient, container: Container) -> int:
@@ -573,6 +619,43 @@ def _read_tail(container: Container, path: str, byte_count: int | None) -> bytes
     return result.output if result.exit_code == EXIT_SUCCESS else b""
 
 
+def _read_strace_text(container: Container) -> tuple[str, bool]:
+    """The trace lines that matter, read inside the container so a huge trace is never loaded.
+
+    Lines for the tripwire files always come first, so flooding the trace cannot push them out.
+    The second filter (connections and anything that changes a file) is capped; the flag says
+    whether the cap cut it off.
+    """
+    tripwire_filter = " ".join(f"-e '<{path}>'" for path in TRIPWIRE_PATHS)
+    relevant = "connect\\(|O_WRONLY|O_RDWR|O_CREAT|O_TRUNC|O_APPEND|" + "|".join(TRACED_CHANGE_SYSCALLS)
+    script = (
+        f"grep -a -F {tripwire_filter} {STRACE_LOG_PATH}; "
+        f"grep -a -E '{relevant}' {STRACE_LOG_PATH} | head -c {STRACE_TEXT_MAX_BYTES}"
+    )
+    result = container.exec_run(["sh", "-c", f"({script}) 2>/dev/null"])
+    return result.output.decode(errors="replace"), len(result.output) >= STRACE_TEXT_MAX_BYTES
+
+
+def _evidence_problems(container: Container) -> list[str]:
+    """Notes for anything that suggests the command tampered with the trace.
+
+    The command runs as the same user as strace, so it can delete, replace or overwrite the trace
+    file or kill strace; this cannot be prevented here, but it can be noticed.
+    """
+    problems = []
+    baseline = _read_tail(container, INODE_PATH, None).strip()
+    current = container.exec_run(["stat", "-c", "%i", STRACE_LOG_PATH])
+    if not baseline:
+        problems.append("The trace's starting state was not recorded, so the trace cannot be trusted.")
+    elif current.exit_code != EXIT_SUCCESS:
+        problems.append("The command deleted the trace file, so its file and network activity is unknown.")
+    elif current.output.strip() != baseline:
+        problems.append("The command replaced the trace file, so its file and network activity is unknown.")
+    elif container.exec_run(["grep", "-q", "-a", "-P", "\\x00", STRACE_LOG_PATH]).exit_code == EXIT_SUCCESS:
+        problems.append("The command overwrote part of the trace file, so its activity may be hidden.")
+    return problems
+
+
 def _run_checked(container: Container, command: list[str]) -> bytes:
     """Run a helper command inside the container; a failure is a sandbox failure."""
     result = container.exec_run(command)
@@ -595,13 +678,17 @@ def _paths_of_kind(changes: dict[str, int], kind: int) -> set[str]:
     return {path for path, path_kind in changes.items() if path_kind == kind}
 
 
-def _modified_files(container: Container, created_paths: set[str]) -> list[str]:
-    """Files written to since the run marker that the command did not create.
+def _modified_files(
+    container: Container, created_paths: set[str], started_epoch: str
+) -> list[str]:
+    """Files changed since the run started that the command did not create.
 
-    The diff cannot see these for copied files (they are all 'added'), so mtimes are used.
+    The diff cannot see these for copied files (they are all 'added'). The change time is used,
+    not the modification time: a command can set mtime to anything (`touch -r`, `cp -p`), but
+    only the kernel sets ctime.
     """
     output = _run_checked(
-        container, ["find", WORKSPACE, "-type", "f", "-newer", RUN_MARKER_PATH]
+        container, ["find", WORKSPACE, "-type", "f", "-newerct", f"@{started_epoch}"]
     ).decode(errors="replace")
     return sorted(set(output.splitlines()) - created_paths)
 
@@ -611,6 +698,8 @@ def _remove_container(container: Container) -> None:
         container.remove(force=True)
     except NotFound:
         pass  # already gone
+    except APIError as exc:
+        raise SandboxEnvironmentError(f"Docker could not remove the sandbox container: {exc}") from exc
 
 
 def _hosts(records: list[dict]) -> list[str]:

@@ -147,3 +147,35 @@ def test_new_sandbox_containers_carry_the_reaper_labels() -> None:
     labels = environment.sandbox_container_labels()
     assert labels[environment.SANDBOX_CONTAINER_LABEL] == "true"
     assert float(labels[environment.SANDBOX_STARTED_LABEL]) <= time.time()
+
+
+def _logger(status: str, health: str | None) -> object:
+    state = {} if health is None else {"Health": {"Status": health}}
+
+    class FakeLogger:
+        def __init__(self) -> None:
+            self.status = status
+            self.attrs = {"State": state}
+
+    return FakeLogger()
+
+
+@pytest.mark.parametrize(
+    ("status", "health", "expected"),
+    [
+        ("running", "healthy", "running"),
+        ("running", None, "running"),
+        ("running", "unhealthy", "unhealthy"),
+        ("running", "starting", "starting"),
+        ("exited", "healthy", "exited"),
+    ],
+)
+def test_a_running_but_unhealthy_logger_is_not_ok(status: str, health: str | None, expected: str) -> None:
+    assert environment._logger_state(_logger(status, health)) == expected  # type: ignore[arg-type]
+    assert environment.EnvironmentStatus(
+        base_image_present=True, network_present=True, network_internal=True, logger_state=expected
+    ).ok == (expected == "running")
+
+
+def test_missing_logger_state() -> None:
+    assert environment._logger_state(None) == "missing"
