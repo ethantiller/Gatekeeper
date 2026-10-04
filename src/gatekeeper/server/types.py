@@ -2,6 +2,7 @@
 
 from datetime import datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -177,6 +178,17 @@ class JudgeResult(GatekeeperModel):
         default=None, description="Set if the judge call failed or timed out"
     )
 
+class SandboxSession(GatekeeperModel):
+    model_config = ConfigDict(frozen=True)
+    
+    session_id: str = Field(description="Unique identifier for the sandbox session")
+    repo_root: Path = Field(description="Root directory of the repository being sandboxed")
+    tripwire_seed: str = Field(
+        repr=False,
+        exclude=True,
+        description="Seed used for tripwire generation in this session"
+    )
+    
 
 class SandboxReport(GatekeeperModel):
     """
@@ -202,6 +214,15 @@ class SandboxReport(GatekeeperModel):
     tripwires_triggered: list[str] = Field(
         default_factory=list,
         description="Fake secrets (planted .env, AWS creds) that the command read or sent out",
+    )
+    saved_changes_id: str | None = Field(
+        default=None,
+        description="Id of the saved file changes an approval can apply; None if nothing to save",
+    )
+    notes: list[str] = Field(
+        default_factory=list,
+        description="Limits on this report (e.g. the connection log was unavailable); "
+        "when non-empty, do not treat an empty list above as proof that nothing happened",
     )
     error: str | None = Field(
         default=None,
