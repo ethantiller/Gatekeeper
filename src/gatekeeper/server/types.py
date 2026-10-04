@@ -265,3 +265,53 @@ class Decision(GatekeeperModel):
         default=None, description="One-line summary shown in gatekeeper log"
     )
     created_at: datetime = Field(default_factory=eastern_now)
+
+
+class SessionStartSource(StrEnum):
+    """Why Claude Code started or restarted a session."""
+
+    STARTUP = "startup"
+    RESUME = "resume"
+    COMPACT = "compact"
+    CLEAR = "clear"
+
+
+class HookPayload(GatekeeperModel):
+    """
+    Base for what Claude Code posts to a hook. Claude Code sends more fields than we use
+    (hook_event_name, permission_mode, ...), so unlike other types, unknown fields are ignored.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    session_id: str
+    cwd: str = Field(description="Folder Claude Code was in; can be a subfolder of the repo")
+    transcript_path: str | None = None
+
+
+class SessionStartPayload(HookPayload):
+    """The body of POST /hooks/session-start."""
+
+    source: SessionStartSource
+
+
+class PromptPayload(HookPayload):
+    """The body of POST /hooks/prompt."""
+
+    prompt: str = Field(description="What the user typed")
+
+
+class SessionStartHookOutput(GatekeeperModel):
+    """The part of the reply Claude Code reads. additionalContext is added to Claude's context."""
+
+    hook_event_name: str = Field(default="SessionStart", serialization_alias="hookEventName")
+    additional_context: str = Field(serialization_alias="additionalContext")
+
+
+class SessionStartResponse(GatekeeperModel):
+    """
+    The reply to /hooks/session-start. Claude Code expects the camelCase key
+    hookSpecificOutput, so serialize with by_alias=True.
+    """
+
+    hook_specific_output: SessionStartHookOutput = Field(serialization_alias="hookSpecificOutput")
