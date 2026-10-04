@@ -178,6 +178,14 @@ class JudgeResult(GatekeeperModel):
         default=None, description="Set if the judge call failed or timed out"
     )
 
+
+class ScannerLLMReviewResult(GatekeeperModel):
+    """Secondary LLM assessment of suspicious text found by the scanner."""
+
+    suspicious: bool
+    reasoning: str
+
+
 class SandboxSession(GatekeeperModel):
     model_config = ConfigDict(frozen=True)
     
