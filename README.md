@@ -132,7 +132,7 @@ Conventions:
 - **IDs** are UUID strings with dashes, for example `4f28bfba-6756-418b-88d6-19cc02569654` (`str(uuid4())`).
 - **Timestamps** are timezone-aware US Eastern (`America/New_York`). They follow daylight saving: UTC-5 in winter (EST), UTC-4 in summer (EDT).
 - **Enums** (`ActionSource`, `ActionKind`, `Verdict`, `RiskLevel`) serialize as plain lowercase strings.
-- **Action sources** are `claude_hook`, `mcp_vscode`, and `mcp_codex`.
+- **Action sources** are `claude_hook`, `codex_hook`, and `mcp_vscode`.
 
 ## Database
 

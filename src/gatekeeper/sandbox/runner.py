@@ -516,9 +516,12 @@ def _host_path_warnings(
             continue
         path = Path(os.path.expanduser(token))
         path = path if path.is_absolute() else cwd / path
-        if not path.exists():
-            continue
-        resolved = path.resolve()
+        try:
+            if not path.exists():
+                continue
+            resolved = path.resolve()
+        except (OSError, ValueError):
+            continue  # not a usable path: a long quoted script, a NUL byte, a symlink loop
         try:
             relative = resolved.relative_to(root).as_posix()
         except ValueError:

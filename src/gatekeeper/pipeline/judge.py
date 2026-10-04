@@ -8,6 +8,7 @@ from google import genai
 from gatekeeper.pipeline.rate_action_risk import request_judge_result
 from gatekeeper.server.types import (
     JudgeResult,
+    RiskLevel,
     RuleResult,
     SandboxReport,
     StandardAction,
@@ -27,12 +28,23 @@ async def rate(
     client: genai.Client | None = None,
 ) -> JudgeResult:
     """Rate an action. Failures come back in `JudgeResult.error`, not as exceptions."""
-    return await request_judge_result(
-        describe_action(action, rules, sandbox),
-        recent_untrusted_snippets=recent_untrusted_snippets,
-        latest_prompt=latest_prompt,
-        client=client,
-    )
+    try:
+        return await request_judge_result(
+            describe_action(action, rules, sandbox),
+            recent_untrusted_snippets=recent_untrusted_snippets,
+            latest_prompt=latest_prompt,
+            client=client,
+        )
+    except (RuntimeError, ValueError) as error:
+        # No API key, a network or quota failure, or a reply that failed validation.
+        return JudgeResult(
+            risk=RiskLevel.HIGH,
+            score=1.0,
+            reasoning="The judge could not rate this action.",
+            model="unavailable",
+            latency_ms=0,
+            error=str(error),
+        )
 
 
 def describe_action(

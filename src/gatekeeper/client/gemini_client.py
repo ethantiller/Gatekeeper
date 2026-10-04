@@ -69,6 +69,10 @@ async def _generate_with_retry[ResponseT](
 					config=types.GenerateContentConfig(
 						response_mime_type="application/json",
 						response_schema=response_schema,
+						# No tools are passed; leaving AFC on only makes the SDK log a warning.
+						automatic_function_calling=types.AutomaticFunctionCallingConfig(
+							disable=True
+						),
 					),
 				)
 				if not response.text:

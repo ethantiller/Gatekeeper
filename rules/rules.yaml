@@ -63,6 +63,11 @@ safe_commands:
   - git show
   - git branch
   - git rev-parse
+  - cd
+  - mkdir
+  - touch
+  - ruff check
+  - uv run ruff check
   - node --version
   - python --version
   - npm --version

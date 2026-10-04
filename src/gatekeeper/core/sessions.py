@@ -8,14 +8,18 @@ from pathlib import Path
 from gatekeeper.server.types import ActionSource, SandboxSession, eastern_now, new_id
 
 TRIPWIRE_SEED_BYTES = 16
+GIT_TIMEOUT_SECONDS = 5
 
 
 def find_repo_root(working_directory: str) -> str:
     """The repo's top folder, or the folder itself when it is not in a git repo."""
-    result = subprocess.run(
-        ["git", "-C", working_directory, "rev-parse", "--show-toplevel"],
-        capture_output=True, text=True, check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["git", "-C", working_directory, "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, check=False, timeout=GIT_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return working_directory  # git is missing or hung; the folder itself still works
     return result.stdout.strip() if result.returncode == 0 else working_directory
 
 

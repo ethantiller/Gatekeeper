@@ -1,0 +1,6 @@
+{
+  "name": "gatekeeper",
+  "version": "0.1.0",
+  "description": "Checks Claude Code's commands, file writes and web fetches with Gatekeeper before they run, and sandboxes risky ones.",
+  "hooks": "./hooks/hooks.json"
+}

@@ -33,7 +33,6 @@ class ActionSource(StrEnum):
     CLAUDE_HOOK = "claude_hook"
     CODEX_HOOK = "codex_hook"
     MCP_VSCODE = "mcp_vscode"
-    MCP_CODEX = "mcp_codex"
 
 
 class ActionKind(StrEnum):

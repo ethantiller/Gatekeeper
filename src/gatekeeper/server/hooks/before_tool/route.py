@@ -5,6 +5,7 @@ from fastapi import APIRouter, Request
 from gatekeeper.core.sessions import count_action
 from gatekeeper.pipeline import decide as decide_module
 from gatekeeper.server.hooks.actions import ToolPayload, to_actions
+from gatekeeper.server.hooks.before_tool.prompt_text import approval_prompt
 from gatekeeper.server.hooks.client import HookClient
 from gatekeeper.server.types import Decision, Verdict
 
@@ -42,7 +43,7 @@ def _hook_reply(client: HookClient, decision: Decision) -> dict[str, Any]:
     if decision.verdict == Verdict.ALLOW:
         return {}
     if decision.verdict == Verdict.ASK and client == HookClient.CLAUDE:
-        return _permission_reply("ask", decision.summary or DEFAULT_ASK_REASON)
+        return _permission_reply("ask", approval_prompt(decision))
     if decision.verdict == Verdict.ASK:
         return _permission_reply("deny", CODEX_ASK_REASON)
     # agent_reason never repeats sandbox output or fake-secret details, unlike summary.
