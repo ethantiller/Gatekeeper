@@ -13,9 +13,10 @@ from gatekeeper.pipeline import judge, untrusted
 from gatekeeper.pipeline.combine import combine, serious_tags, suspicious_reads_blocking
 from gatekeeper.pipeline.parser import parse
 from gatekeeper.pipeline.rules import (
+    UserRulesError,
     check_action_against_rules,
-    load_default_rules,
     load_rules,
+    load_user_rules,
 )
 from gatekeeper.pipeline.scanner import SUSPICIOUS_SCORE
 from gatekeeper.sandbox import runner
@@ -69,11 +70,13 @@ async def decide(
 
     try:
         config = load_rules(session.repo_root)
+    except UserRulesError:
+        raise  # the user's own file is broken: fail loudly instead of running on other rules
     except (RuntimeError, TypeError, ValueError) as error:
         # A repo's .gatekeeper.yaml is untrusted and can only add checks, so a broken one is
         # ignored rather than failing every tool call in that repo.
         logger.warning("Ignoring the rules file in %s: %s", session.repo_root, error)
-        config = load_default_rules()
+        config = load_user_rules()
     parsed = parse(action)
     rules = check_action_against_rules(action, parsed, config, session.repo_root)
     reads = untrusted.recent(
