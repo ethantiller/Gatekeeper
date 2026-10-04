@@ -9,7 +9,6 @@ from typing import Annotated
 import typer
 
 from gatekeeper import database
-from gatekeeper.cli import brainrot
 from gatekeeper.core import decision_store, sessions
 from gatekeeper.core.checkpoints import (
     CHECKPOINT_REF_PREFIX,
@@ -50,12 +49,6 @@ def _tripwire_seed(conn: sqlite3.Connection, session_id: str) -> str:
     return row["tripwire_seed"] if row else ""
 
 
-def _brainrot_sound(conn: sqlite3.Connection, session_id: str | None, name: str) -> None:
-    """Play a brain rot sound, but only while useless mode is on for the session."""
-    if brainrot.useless_mode_on(conn, session_id):
-        brainrot.play(name)
-
-
 def _find_decision(conn: sqlite3.Connection, id_or_prefix: str) -> Decision:
     try:
         return decision_store.find_decision(conn, id_or_prefix)
@@ -87,7 +80,6 @@ def log(
             raise _fail("No Gatekeeper session found for this repo. Use --all to see every session.")
     for row in reversed(decision_store.list_decisions(conn, session_id, limit)):
         typer.echo(format_row(row))
-    _brainrot_sound(conn, session_id, "taco_bell")
 
 
 def _capped(items: list[str]) -> list[str]:
@@ -169,7 +161,6 @@ def show(
     decision = _find_decision(conn, decision_id)
     text = decision.model_dump_json(indent=2) if as_json else _describe(conn, decision)
     typer.echo(_redact(text, _tripwire_seed(conn, decision.session_id)))
-    _brainrot_sound(conn, decision.session_id, "taco_bell")
 
 
 def _explain_missing_checkpoint(decision: Decision) -> str:
@@ -224,7 +215,6 @@ def rollback(
     except ValueError as error:
         raise _fail(str(error)) from error
     typer.echo(f"Restored {len(diff.changed)} files.")
-    _brainrot_sound(conn, decision.session_id, "metal_pipe")
     if diff.added:
         typer.echo(f"Deleted {len(deleted)} added files." if deleted else "Kept the added files.")
     typer.echo("Files ignored by git (such as node_modules or .env) are never restored or deleted.")

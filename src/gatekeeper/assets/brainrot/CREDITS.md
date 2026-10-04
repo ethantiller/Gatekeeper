@@ -30,3 +30,4 @@ their creators. Sounds are cut to a few seconds and converted to WAV.
 - `sounds/jumpscare.wav`: https://www.myinstants.com/media/sounds/jumpscare.mp3
 - `sounds/windows_error.wav`: https://www.myinstants.com/media/sounds/windows-xp-error-sound.mp3
 - `sounds/sheesh.wav`: https://www.myinstants.com/media/sounds/sheeesh.mp3
+- `sounds/session_start.wav`: played when a new Claude Code session starts; converted from myinstants.mp3, which the project owner added

@@ -17,6 +17,12 @@ MAX_SOUND_SECONDS = 4
 # Some hosts refuse the default httpx user agent.
 HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/130 Safari/537.36"}
 
+# Sounds added by hand, not downloaded by this script: name -> where they came from.
+CUSTOM_SOUNDS = {
+    "session_start": "played when a new Claude Code session starts; converted from myinstants.mp3,"
+    " which the project owner added",
+}
+
 # name -> myinstants file name (without .mp3)
 SOUNDS = {
     "vine_boom": "vine-boom",
@@ -50,9 +56,11 @@ SOUNDS = {
 def main() -> None:
     if shutil.which("ffmpeg") is None:
         raise SystemExit("ffmpeg is required to convert the sounds")
-    # Start clean so a name dropped from the lists above does not linger.
-    shutil.rmtree(ASSETS, ignore_errors=True)
-    (ASSETS / "sounds").mkdir(parents=True)
+    (ASSETS / "sounds").mkdir(parents=True, exist_ok=True)
+    # A sound dropped from the list above should not linger, but hand-added ones stay.
+    for stale in (ASSETS / "sounds").glob("*.wav"):
+        if stale.stem not in SOUNDS and stale.stem not in CUSTOM_SOUNDS:
+            stale.unlink()
     credits = [
         "# Brain rot media credits",
         "",
@@ -78,8 +86,9 @@ def main() -> None:
                     check=True,
                 )
             credits.append(f"- `sounds/{name}.wav`: {url}")
+    credits += [f"- `sounds/{name}.wav`: {note}" for name, note in CUSTOM_SOUNDS.items()]
     (ASSETS / "CREDITS.md").write_text("\n".join(credits) + "\n")
-    print(f"Wrote {len(SOUNDS)} sounds to {ASSETS}")
+    print(f"Wrote {len(SOUNDS)} sounds to {ASSETS} (hand-added sounds kept)")
 
 
 if __name__ == "__main__":
