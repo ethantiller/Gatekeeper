@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import typer
 
+from gatekeeper.sandbox.repo_images import build_repo_image
 from gatekeeper.sandbox.runner import run
 from gatekeeper.server.types import (
     ActionKind,
@@ -50,9 +51,15 @@ def sandbox_test(
     cwd: Annotated[
         Path | None, typer.Option(help="Folder inside the repo to run from (default: repo root)")
     ] = None,
+    build_image: Annotated[
+        bool, typer.Option(help="Build (or reuse) the repo image first and wait for it")
+    ] = False,
 ) -> None:
     """Run a command in the sandbox and print what it did."""
     repo_root = repo.resolve()
+    if build_image:
+        repo_image = build_repo_image(repo_root)
+        print(f"repo image: {repo_image.tag if repo_image else 'none (no lockfile or commit)'}")
     session = SandboxSession(
         session_id=f"sandbox-test-{uuid4().hex[:8]}",
         repo_root=repo_root,

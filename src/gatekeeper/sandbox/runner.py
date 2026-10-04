@@ -34,6 +34,13 @@ from gatekeeper.sandbox.environment import (
     sandbox_container_labels,
     unregister_tripwires,
 )
+from gatekeeper.sandbox.repo_images import (
+    RepoChanges,
+    RepoImageState,
+    changes_since,
+    ready_repo_image,
+    repo_image_status,
+)
 from gatekeeper.sandbox.strace_log import (
     TRACED_CHANGE_SYSCALLS,
     TRACED_SYSCALLS,
@@ -70,6 +77,7 @@ STRACE_TEXT_MAX_BYTES = 32 * 1024**2  # most trace lines read back; the rest is 
 EXIT_CODE_PATH = "/tmp/gk-exit"
 STDOUT_PATH = "/tmp/gk-stdout"
 STDERR_PATH = "/tmp/gk-stderr"
+UNTRACKED_TAG = b"?"  # `git ls-files -t` marks untracked files with ?
 DISK_LIMIT_BYTES = 2 * 1024**3  # what the command may add to the container's writable layer
 DISK_CHECK_SECONDS = 1.0
 # PID 1 (`sleep infinity`) ignores SIGKILL from inside its own namespace, so the container survives.
@@ -113,6 +121,30 @@ def run(action: StandardAction, session: SandboxSession) -> SandboxReport:
         return SandboxReport(image=base_image_tag(), error=str(exc))
 
 
+def _choose_image(
+    repo_root: Path, warnings: list[str], untracked: list[str]
+) -> tuple[str, RepoChanges | None]:
+    """The repo image plus what changed since it was built, else the base image and no changes."""
+    repo_image = ready_repo_image(repo_root)
+    if repo_image is None:
+        status = repo_image_status(repo_root)
+        if status.state is RepoImageState.FAILED:
+            warnings.append(
+                f"The repo image build failed ({status.detail}); ran on the base image "
+                "without the repo's dependencies."
+            )
+        elif status.state is RepoImageState.BUILDING:
+            warnings.append("The repo image is still building; ran without the repo's dependencies.")
+        elif status.detail:
+            warnings.append("No repo image has been built yet; ran without the repo's dependencies.")
+        return base_image_tag(), None
+    changes = changes_since(repo_root, repo_image.commit, untracked)
+    if changes is None:
+        warnings.append("git no longer has the repo image's commit; ran on the base image.")
+        return base_image_tag(), None
+    return repo_image.tag, changes
+
+
 def _container_workdir(cwd: str, repo_root: Path, warnings: list[str]) -> str:
     """Where in the container the command starts: the folder the agent was in, inside the repo."""
     try:
@@ -136,10 +168,10 @@ def _run_in_container(
 ) -> SandboxReport:
     ensure_environment()
     warnings: list[str] = []
-    repo_file_paths = _list_repo_files(session.repo_root)
-    image = base_image_tag()
+    repo_files = _list_repo_files(session.repo_root)
+    image, changes = _choose_image(session.repo_root, warnings, repo_files.untracked)
     workdir = _container_workdir(action.cwd, session.repo_root, warnings)
-    warnings += _host_path_warnings(command, Path(action.cwd), session.repo_root, repo_file_paths)
+    warnings += _host_path_warnings(command, Path(action.cwd), session.repo_root, repo_files.paths)
     client = get_docker_client()
     started_at = time.time()
 
@@ -148,11 +180,13 @@ def _run_in_container(
     resources = _RunResources()
     try:
         # The logger must know the fake values before the command can send them anywhere.
-        _set_up(resources, client, image, session, run_label, repo_file_paths)
+        _set_up(resources, client, image, session, run_label, repo_files.paths, changes)
         sandbox_container = resources.container
         sandbox_container.start()
         client_ip = _container_ip(sandbox_container)
         proxy_address = (_logger_ip(client), LOGGER_PORT)
+        if changes is not None:
+            _delete_removed_files(sandbox_container, changes.deleted_paths)
         workdir = _existing_workdir(sandbox_container, workdir, warnings)
         observation = _observe_run(client, sandbox_container, command, workdir)
         # Read while the values are still registered: late events can still be scanned.
@@ -192,14 +226,16 @@ def _set_up(
     session: SandboxSession,
     run_label: str,
     repo_file_paths: list[str],
+    changes: RepoChanges | None,
 ) -> None:
     """Create the container, build the three tars and register the tripwires at the same time,
-    then copy the tars in.
+    then copy the tars in. With a repo image only the files changed since it was built are copied.
     """
+    copied_paths = repo_file_paths if changes is None else changes.changed_paths
     with ThreadPoolExecutor(max_workers=SETUP_WORKERS) as pool:
         container_future = pool.submit(_create_container, client, image)
         register_future = pool.submit(register_tripwires, run_label, session.tripwire_seed)
-        repo_future = pool.submit(_build_repo_copy_archive, session.repo_root, repo_file_paths)
+        repo_future = pool.submit(_build_repo_copy_archive, session.repo_root, copied_paths)
         # A repo that ships its own .env must not be overwritten by the planted one.
         secrets_future = pool.submit(
             build_tripwire_archive, session.tripwire_seed, skip_workspace_env=".env" in repo_file_paths
@@ -273,6 +309,12 @@ def _container_ip(container: Container) -> str:
 
 def _logger_ip(client: DockerClient) -> str:
     return _container_ip(client.containers.get(LOGGER_NAME))
+
+
+def _delete_removed_files(container: Container, deleted_paths: list[str]) -> None:
+    """Remove files the repo image still has but the working tree deleted."""
+    if deleted_paths:
+        _run_checked(container, ["rm", "-rf", "--", *(f"{WORKSPACE}/{path}" for path in deleted_paths)])
 
 
 @dataclass(frozen=True)
@@ -411,20 +453,34 @@ def _run_warnings(evidence: _RunEvidence) -> list[str]:
     return warnings
 
 
-def _list_repo_files(repo_root: Path) -> list[str]:
-    """Tracked and untracked files that are not gitignored, relative to the repo root."""
+@dataclass(frozen=True)
+class _RepoFiles:
+    paths: list[str]  # tracked and untracked files that are not gitignored
+    untracked: list[str]  # the untracked ones among them
+
+
+def _list_repo_files(repo_root: Path) -> _RepoFiles:
+    """The repo's files relative to its root, from one git call (-t tags tracked and untracked)."""
     try:
         result = subprocess.run(
-            ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+            ["git", "ls-files", "-z", "-t", "--cached", "--others", "--exclude-standard"],
             cwd=repo_root, capture_output=True, check=False,
         )
     except FileNotFoundError as exc:
         raise SandboxEnvironmentError("The git command was not found.") from exc
     if result.returncode != EXIT_SUCCESS:
         raise SandboxEnvironmentError(f"{repo_root} is not a git repository, so it cannot be copied.")
-    # fsdecode, not decode: a file name need not be valid UTF-8.
-    names = [os.fsdecode(name) for name in result.stdout.split(b"\0")]
-    return [name for name in names if name and (repo_root / name).is_file()]
+    paths: list[str] = []
+    untracked: list[str] = []
+    for entry in result.stdout.split(b"\0"):
+        # Each entry is "<tag> <path>"; fsdecode, not decode: a file name need not be UTF-8.
+        tag, _, name_bytes = entry.partition(b" ")
+        name = os.fsdecode(name_bytes)
+        if name and (repo_root / name).is_file():
+            paths.append(name)
+            if tag == UNTRACKED_TAG:
+                untracked.append(name)
+    return _RepoFiles(paths=paths, untracked=untracked)
 
 
 def _host_path_warnings(

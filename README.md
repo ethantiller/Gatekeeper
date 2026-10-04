@@ -103,6 +103,8 @@ Tests: `uv run pytest`. `tests/test_sandbox_network.py` needs a running Docker d
 
 **Running a command** (GK-4): `sandbox.runner.run(action, session)` copies the repo (minus gitignored files), the fake secrets and the logger CA into a throwaway container on `gk-sandbox`, runs `action.command` under `strace` with a 30 s timeout, and returns a `SandboxReport`. Try it with `uv run python -m gatekeeper.cli.dev "<command>"` (to be `gatekeeper sandbox-test`).
 
+**Repo image** (`sandbox/repo_images.py`): `start_repo_image_build(repo_root)` builds `gatekeeper-repo:<hash>` in the background from `git archive HEAD`, with dependencies installed from `package-lock.json`, `pnpm-lock.yaml` or `uv.lock` (npm and pnpm with `--ignore-scripts`, because the build has network access). The tag is a hash of the repo path and the lockfile at HEAD; an existing image is reused. When it is ready, `run()` starts from it and copies in only the files that differ from the image's commit (`git diff` plus untracked files). `.devcontainer` is not used: its commands would run repo-controlled code with network access outside the sandbox.
+
 **strace** works as user `sandbox` with `cap_drop=["ALL"]` and no extra capabilities (tested on Docker 29.4.1).
 
 ## Shared types

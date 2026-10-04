@@ -24,7 +24,7 @@ def _git(repo: Path, *args: str) -> None:
     subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
 
 
-def test_list_repo_files_skips_ignored(tmp_path: Path) -> None:
+def test_list_repo_files_separates_untracked_and_skips_ignored(tmp_path: Path) -> None:
     _git(tmp_path, "init", "-q")
     (tmp_path / "tracked.txt").write_text("1")
     (tmp_path / ".gitignore").write_text("ignored.txt\n")
@@ -32,7 +32,9 @@ def test_list_repo_files_skips_ignored(tmp_path: Path) -> None:
     (tmp_path / "untracked.txt").write_text("2")
     (tmp_path / "ignored.txt").write_text("3")
 
-    assert sorted(_list_repo_files(tmp_path)) == [".gitignore", "tracked.txt", "untracked.txt"]
+    files = _list_repo_files(tmp_path)
+    assert sorted(files.paths) == [".gitignore", "tracked.txt", "untracked.txt"]
+    assert files.untracked == ["untracked.txt"]
 
 
 def test_repo_copy_archive_is_a_rewound_temp_file(tmp_path: Path) -> None:
