@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ipaddress
+import os
 import re
 import shlex
 from copy import deepcopy
@@ -25,6 +27,16 @@ from gatekeeper.server.types import (
 
 DEFAULT_RULES_PATH = Path(__file__).resolve().parents[3] / "rules" / "rules.yaml"
 REPOSITORY_RULES_NAME = ".gatekeeper.yaml"
+# A cloned repo is untrusted, so its rules file may only add checks. Lists are appended, so
+# these keys can only make Gatekeeper stricter; safe_commands, allowed_hosts, auto_allow_tags,
+# judge_failure_verdict and the limits come from the user's own rules only.
+REPOSITORY_OVERRIDE_KEYS = {
+    "never_allowed",
+    "tags",
+    "protected_files",
+    "agent_config_paths",
+    "sandbox_tags",
+}
 
 
 def load_rules(repo_path: str | Path | None = None) -> dict[str, Any]:
@@ -36,7 +48,9 @@ def load_rules(repo_path: str | Path | None = None) -> dict[str, Any]:
     if not override_path.exists():
         return defaults
 
-    return _merge_rule_values(defaults, _read_rule_config(override_path))
+    overrides = _read_rule_config(override_path)
+    allowed = {key: value for key, value in overrides.items() if key in REPOSITORY_OVERRIDE_KEYS}
+    return _merge_rule_values(defaults, allowed)
 
 
 def _read_rule_config(path: Path) -> dict[str, Any]:
@@ -74,20 +88,45 @@ def check_action_against_rules(
     action: StandardAction,
     parsed: ParsedCommand | None = None,
     rules: dict[str, Any] | None = None,
+    repo_root: Path | None = None,
 ) -> RuleResult:
-    """Check an action against hard denies, risk tags, then the safe command list."""
+    """Check an action against hard denies, risk tags, then the safe command list.
+
+    `repo_root` is the boundary for the outside-repo check; it defaults to `action.cwd`.
+    """
     parsed = parsed or parse(action)
     config = load_rules(action.cwd) if rules is None else rules
+
+    empty = _empty_action_result(action)
+    if empty is not None:
+        return empty
 
     denial = _never_allowed_result(config, action, parsed)
     if denial is not None:
         return denial
 
-    tags, reasons = _collect_action_risk_tags(config, action, parsed)
+    tags, reasons = _collect_action_risk_tags(config, action, parsed, repo_root)
     if tags:
         return RuleResult(tags=sorted(tags), reasons=reasons)
 
     return _safe_command_allow_result(config, parsed) or RuleResult()
+
+
+def _empty_action_result(action: StandardAction) -> RuleResult | None:
+    """Deny an action that has nothing to act on, instead of passing it to the judge."""
+    target = {
+        ActionKind.RUN_COMMAND: action.command,
+        ActionKind.WRITE_FILE: action.path,
+        ActionKind.READ_FILE: action.path,
+        ActionKind.FETCH_URL: action.url,
+    }
+    if action.kind not in target or (target[action.kind] or "").strip():
+        return None
+    return RuleResult(
+        matched_rule_ids=["empty-action"],
+        forced_verdict=Verdict.DENY,
+        reasons=[f"The {action.kind.value} action has nothing to act on"],
+    )
 
 
 def _never_allowed_result(
@@ -110,7 +149,10 @@ def _never_allowed_result(
 
 # Collect risk tags for an action based on the configuration and the parsed command
 def _collect_action_risk_tags(
-    config: dict[str, Any], action: StandardAction, parsed: ParsedCommand
+    config: dict[str, Any],
+    action: StandardAction,
+    parsed: ParsedCommand,
+    repo_root: Path | None = None,
 ) -> tuple[set[str], list[str]]:
     tags: set[str] = set()
     reasons: list[str] = []
@@ -133,18 +175,27 @@ def _collect_action_risk_tags(
         reasons.append("The command pipes downloaded content to a shell")
 
     touched_paths = _collect_action_paths(action, parsed)
-    if any(_path_matches_pattern(path, config.get("protected_files", []), action.cwd) for path in touched_paths):
+    if any(path_matches_pattern(path, config.get("protected_files", []), action.cwd) for path in touched_paths):
         tags.add("touches_secrets")
         reasons.append("The action touches a protected file")
 
     if _action_writes_files(action, parsed) and any(
-        _path_matches_pattern(path, config.get("agent_config_paths", []), action.cwd)
+        path_matches_pattern(path, config.get("agent_config_paths", []), action.cwd)
         for path in touched_paths
     ):
         tags.add("edits_agent_config")
         reasons.append("The action writes to agent configuration")
 
+    outside = _paths_outside_repo(action, parsed, repo_root)
+    if outside:
+        tags.add("outside_repo")
+        reasons.append(f"The action touches paths outside the repository: {', '.join(outside)}")
+
     hosts = extract_hosts(parsed, action.url)
+    private_hosts = [host for host in hosts if _is_private_host(host)]
+    if private_hosts:
+        tags.add("private_network")
+        reasons.append(f"The action reaches a local or private network host: {', '.join(private_hosts)}")
     if hosts:
         tags.add("network")
         allowed_hosts = [str(host).lower() for host in config.get("allowed_hosts", [])]
@@ -158,6 +209,32 @@ def _collect_action_risk_tags(
             reasons.append("The action fetches a URL")
 
     return tags, reasons
+
+
+# Paths the action writes or reads directly (path argument and redirects) that leave the repo.
+def _paths_outside_repo(
+    action: StandardAction, parsed: ParsedCommand, repo_root: Path | None
+) -> list[str]:
+    boundary = Path(os.path.realpath(repo_root or action.cwd))
+    candidates = [action.path] if action.path else []
+    candidates.extend([*parsed.redirect_targets, *extract_redirect_paths(parsed.raw)])
+    outside: list[str] = []
+    for candidate in candidates:
+        resolved = Path(os.path.realpath(Path(action.cwd) / _normalize_path(candidate)))
+        if not resolved.is_relative_to(boundary) and candidate not in outside:
+            outside.append(candidate)
+    return outside
+
+
+# Loopback, private, link-local and similar addresses, plus the names that point at them.
+def _is_private_host(host: str) -> bool:
+    if host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
+        return True
+    try:
+        address = ipaddress.ip_address(host.strip("[]"))
+    except ValueError:
+        return False
+    return not address.is_global
 
 
 # Determine if a command should be allowed based on the safe commands configuration
@@ -308,7 +385,7 @@ def _action_writes_files(action: StandardAction, parsed: ParsedCommand) -> bool:
 
 
 # Check if a given path matches any of the specified patterns
-def _path_matches_pattern(path: str, patterns: Any, cwd: str) -> bool:
+def path_matches_pattern(path: str, patterns: Any, cwd: str) -> bool:
     normalized_path = _normalize_path(path)
     candidates = {normalized_path}
     normalized_cwd = _normalize_path(cwd).rstrip("/")

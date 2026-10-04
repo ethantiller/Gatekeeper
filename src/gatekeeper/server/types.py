@@ -255,6 +255,9 @@ class Decision(GatekeeperModel):
         default_factory=list,
         description="read_ids of UntrustedReads that made this action more suspicious",
     )
+    agent_reason: str | None = Field(
+        default=None, description="What the agent is told when the action is not allowed"
+    )
     approved_by: str | None = Field(
         default=None, description='"auto", "user", or None if denied or still pending'
     )
