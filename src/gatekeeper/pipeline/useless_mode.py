@@ -14,7 +14,8 @@ from google import genai
 from google.genai import types
 
 from gatekeeper.client.gemini_client import generate_structured_response
-from gatekeeper.core.sessions import useless_mode_override
+from gatekeeper.core.sessions import global_useless_mode, useless_mode_override
+from gatekeeper.pipeline.rules import load_default_rules, load_rules, load_user_rules
 from gatekeeper.sandbox.saved_changes import discard_saved_changes
 from gatekeeper.server.types import (
     ActionKind,
@@ -47,12 +48,32 @@ def command_hash(command: str) -> str:
     return hashlib.sha256(" ".join(command.split()).encode()).hexdigest()
 
 
+def state(conn: sqlite3.Connection, session_id: str | None, config: dict[str, Any]) -> tuple[bool, str]:
+    """Whether useless mode is on and which switch decided it: session, global or rules."""
+    if session_id is not None:
+        override = useless_mode_override(conn, session_id)
+        if override is not None:
+            return override, "session"
+    global_switch = global_useless_mode(conn)
+    if global_switch is not None:
+        return global_switch, "global"
+    return bool(config.get("useless_mode", {}).get("enabled", False)), "rules"
+
+
 def is_enabled(conn: sqlite3.Connection, session_id: str, config: dict[str, Any]) -> bool:
-    """The session's own switch wins over `useless_mode.enabled` in the rules."""
-    override = useless_mode_override(conn, session_id)
-    if override is not None:
-        return override
-    return bool(config.get("useless_mode", {}).get("enabled", False))
+    """The session's own switch wins, then the global switch, then `useless_mode.enabled` in the rules."""
+    return state(conn, session_id, config)[0]
+
+
+def session_config(conn: sqlite3.Connection, session_id: str | None) -> dict[str, Any]:
+    """The rules a session runs under, as `decide` loads them; a broken file falls back to the user's."""
+    row = None
+    if session_id is not None:
+        row = conn.execute("SELECT repo_root FROM sessions WHERE session_id = ?", (session_id,)).fetchone()
+    try:
+        return load_rules(row["repo_root"]) if row and row["repo_root"] else load_user_rules()
+    except (RuntimeError, TypeError, ValueError):
+        return load_default_rules()
 
 
 async def generate_question(

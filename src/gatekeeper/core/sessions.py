@@ -126,3 +126,18 @@ def count_action(
         tripwire_seed=session_row["tripwire_seed"],
     )
     return session, session_row["action_counter"]
+
+
+def global_useless_mode(connection: sqlite3.Connection) -> bool | None:
+    """The switch for every session without its own, or None when it was never set."""
+    row = connection.execute("SELECT value FROM settings WHERE key = 'useless_mode'").fetchone()
+    return None if row is None else row["value"] == "on"
+
+
+def set_global_useless_mode(connection: sqlite3.Connection, enabled: bool) -> None:
+    with connection:
+        connection.execute(
+            "INSERT INTO settings (key, value) VALUES ('useless_mode', ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            ("on" if enabled else "off",),
+        )

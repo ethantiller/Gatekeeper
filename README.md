@@ -57,7 +57,7 @@ gatekeeper/
 │       ├── approve.py              # gatekeeper approve (GK-7)
 │       ├── review.py               # gatekeeper log, show, rollback (GK-11)
 │       ├── dev.py                  # gatekeeper sandbox-test (GK-4)
-│       ├── fun.py                  # gatekeeper fun on|off|watch (GK-10)
+│       ├── fun.py                  # gatekeeper fun on|off|toggle|status|watch (GK-10)
 │       └── brainrot.py             # brain rot sounds and random scares (GK-10)
 ├── docker/
 │   ├── base.Dockerfile             # base sandbox image (GK-2)

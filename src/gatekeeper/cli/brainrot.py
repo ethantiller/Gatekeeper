@@ -10,8 +10,7 @@ from importlib import resources
 from pathlib import Path
 from typing import TextIO
 
-from gatekeeper.pipeline.rules import load_default_rules, load_rules
-from gatekeeper.pipeline.useless_mode import is_enabled
+from gatekeeper.pipeline import useless_mode
 from gatekeeper.server.types import Verdict
 
 ASSETS = resources.files("gatekeeper") / "assets" / "brainrot"
@@ -48,15 +47,8 @@ def sound_for(verdict: Verdict | str, text: str = "") -> str:
 
 
 def useless_mode_on(conn: sqlite3.Connection, session_id: str | None) -> bool:
-    """Whether useless mode is on for the session, using its repo's rules the way `decide` does."""
-    if session_id is None:
-        return False
-    row = conn.execute("SELECT repo_root FROM sessions WHERE session_id = ?", (session_id,)).fetchone()
-    try:
-        config = load_rules(row["repo_root"]) if row and row["repo_root"] else load_default_rules()
-    except (RuntimeError, TypeError, ValueError):
-        config = load_default_rules()  # a broken repo rules file is ignored, as in `decide`
-    return is_enabled(conn, session_id, config)
+    """Whether useless mode is on for the session (or globally, with no session)."""
+    return useless_mode.state(conn, session_id, useless_mode.session_config(conn, session_id))[0]
 
 
 def sound_path(name: str) -> Path:

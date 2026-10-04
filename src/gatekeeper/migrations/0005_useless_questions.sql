@@ -8,3 +8,8 @@ CREATE TABLE useless_questions (
   used_at          TEXT                       -- set when a retry used the answer
 );
 CREATE INDEX idx_useless_questions_lookup ON useless_questions(session_id, command_sha256);
+
+CREATE TABLE settings (      -- global switches; a session's own metadata_json switch wins over these
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);

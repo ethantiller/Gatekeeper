@@ -2,6 +2,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import uvicorn
+from dotenv import load_dotenv
 from fastapi import FastAPI
 
 from gatekeeper import database
@@ -9,6 +10,7 @@ from gatekeeper.client import gemini_client
 from gatekeeper.server import hooks
 from gatekeeper.server.auth import TokenCheckMiddleware, load_or_create_token
 from gatekeeper.server.mcp_tools import mcp
+from gatekeeper.setup import paths
 
 HOST = "127.0.0.1"
 PORT = 8787
@@ -47,6 +49,8 @@ def create_app(expected_token: str) -> FastAPI:
 
 
 def run() -> None:
+    # A login service does not inherit the shell's environment, so the key lives in this file.
+    load_dotenv(paths.env_path())
     expected_token = load_or_create_token()
     app = create_app(expected_token)
 
