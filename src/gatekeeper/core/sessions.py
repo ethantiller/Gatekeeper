@@ -1,5 +1,6 @@
 """Session records: repo root, tripwire seed, action counter and saved prompts (GK-6)."""
 
+import json
 import secrets
 import sqlite3
 import subprocess
@@ -57,22 +58,51 @@ def record_prompt(
     text: str,
     source: ActionSource,
 ) -> None:
-    """Add 1 to the action counter and save the prompt, as the answer if a question was pending."""
+    """Add 1 to the action counter and save the prompt, as the answer to any open useless questions."""
     ensure_session(connection, session_id, working_directory, source)
+    prompt_id = new_id()
     with connection:
-        pending_question = connection.execute(
-            "SELECT pending_useless_question FROM sessions WHERE session_id = ?", (session_id,)
-        ).fetchone()[0]
         connection.execute(
-            "UPDATE sessions SET action_counter = action_counter + 1, pending_useless_question = NULL"
-            " WHERE session_id = ?",
+            "UPDATE sessions SET action_counter = action_counter + 1 WHERE session_id = ?",
             (session_id,),
         )
         connection.execute(
-            "INSERT INTO prompts (prompt_id, session_id, text, created_at, answers_question)"
-            " VALUES (?, ?, ?, ?, ?)",
-            (new_id(), session_id, text, eastern_now().isoformat(), pending_question),
+            "INSERT INTO prompts (prompt_id, session_id, text, created_at) VALUES (?, ?, ?, ?)",
+            (prompt_id, session_id, text, eastern_now().isoformat()),
         )
+        connection.execute(
+            "UPDATE useless_questions SET answer_prompt_id = ?"
+            " WHERE session_id = ? AND answer_prompt_id IS NULL",
+            (prompt_id, session_id),
+        )
+
+
+def set_useless_mode(connection: sqlite3.Connection, session_id: str, enabled: bool) -> bool:
+    """Turn useless mode on or off for one session. False if the session does not exist."""
+    row = connection.execute(
+        "SELECT metadata_json FROM sessions WHERE session_id = ?", (session_id,)
+    ).fetchone()
+    if row is None:
+        return False
+    metadata = json.loads(row["metadata_json"])
+    metadata["useless_mode"] = enabled
+    with connection:
+        connection.execute(
+            "UPDATE sessions SET metadata_json = ? WHERE session_id = ?",
+            (json.dumps(metadata), session_id),
+        )
+    return True
+
+
+def useless_mode_override(connection: sqlite3.Connection, session_id: str) -> bool | None:
+    """The session's own useless-mode switch, or None when it was never set."""
+    row = connection.execute(
+        "SELECT metadata_json FROM sessions WHERE session_id = ?", (session_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    value = json.loads(row["metadata_json"]).get("useless_mode")
+    return value if isinstance(value, bool) else None
 
 
 def count_action(
@@ -96,3 +126,23 @@ def count_action(
         tripwire_seed=session_row["tripwire_seed"],
     )
     return session, session_row["action_counter"]
+
+
+def global_useless_mode(connection: sqlite3.Connection) -> bool | None:
+    """The switch for every session without its own, or None when it was never set."""
+    row = connection.execute("SELECT value FROM settings WHERE key = 'useless_mode'").fetchone()
+    return None if row is None else row["value"] == "on"
+
+
+def set_global_useless_mode(connection: sqlite3.Connection, enabled: bool) -> None:
+    """Set the switch for every session and clear their own switches, so this one decides."""
+    with connection:
+        connection.execute(
+            "INSERT INTO settings (key, value) VALUES ('useless_mode', ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            ("on" if enabled else "off",),
+        )
+        connection.execute(
+            "UPDATE sessions SET metadata_json = json_remove(metadata_json, '$.useless_mode')"
+            " WHERE json_extract(metadata_json, '$.useless_mode') IS NOT NULL"
+        )

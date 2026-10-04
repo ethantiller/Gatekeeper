@@ -16,12 +16,14 @@ gatekeeper/
 │   ├── database.py                 # SQLite connection, WAL mode, runs migrations (GK-1)
 │   ├── migrations/
 │   │   ├── 0001_initial.sql        # the five tables: sessions, prompts, untrusted_reads, decisions, checkpoints (GK-1)
-│   │   └── 0004_untrusted_snippets.sql  # sequence, score and snippet on untrusted_reads (GK-8)
+│   │   ├── 0004_untrusted_snippets.sql  # sequence, score and snippet on untrusted_reads (GK-8)
+│   │   ├── 0005_useless_questions.sql   # questions useless mode asked and the answers (GK-10)
+│   │   └── 0006_drop_pending_question.sql  # drops the columns 0005 replaced (GK-10)
 │   ├── server/
 │   │   ├── types.py                # shared Pydantic types (GK-1)
 │   │   ├── main.py                 # server startup and route mounting (GK-1)
 │   │   ├── auth.py                 # X-Gatekeeper-Token check (GK-1)
-│   │   ├── hooks/                  # /hooks/{client}/<event>, one folder per event: session_start, prompt, before_tool, after_tool (GK-6)
+│   │   ├── hooks/                  # /hooks/{client}/<event>, one folder per event: session_start, prompt, before_tool, after_tool, stop (GK-6, GK-10)
 │   │   ├── mcp_tools.py            # run_command, write_file, read_file, fetch_url (GK-7)
 │   │   ├── review_routes.py        # GET /decisions, POST /rollback (GK-11)
 │   │   └── approval_socket.py      # WebSocket /approvals (GK-7)
@@ -30,6 +32,7 @@ gatekeeper/
 │   │   ├── actions.py              # tool call to StandardAction (GK-6)
 │   │   ├── executor.py             # runs approved commands on the host (GK-7)
 │   │   ├── approvals.py            # waits for user approval (GK-7)
+│   │   ├── sounds.py               # picks and plays a brain rot sound for each prompt and reply (GK-10)
 │   │   ├── decision_store.py       # saves decisions, writes summaries (GK-5)
 │   │   └── checkpoints.py          # git checkpoints and rollback (GK-5, GK-11)
 │   ├── pipeline/
@@ -43,6 +46,7 @@ gatekeeper/
 │   │   ├── rate_action_risk.py     # LLM risk rating request (GK-5)
 │   │   ├── combine.py              # if/else that produces the final verdict (GK-5)
 │   │   └── useless_mode.py         # sarcastic question generation (GK-10)
+│   ├── assets/brainrot/            # brain rot sound files for useless mode, with CREDITS.md (GK-10)
 │   ├── sandbox/
 │   │   ├── repo_images.py          # builds and caches repo images (GK-4)
 │   │   ├── runner.py               # runs a command in a container (GK-4)
@@ -54,7 +58,8 @@ gatekeeper/
 │       ├── init.py                 # gatekeeper init (GK-12)
 │       ├── approve.py              # gatekeeper approve (GK-7)
 │       ├── review.py               # gatekeeper log, show, rollback (GK-11)
-│       └── dev.py                  # gatekeeper sandbox-test, fun on|off (GK-4, GK-10)
+│       ├── dev.py                  # gatekeeper sandbox-test (GK-4)
+│       └── fun.py                  # gatekeeper fun on|off|toggle|status (GK-10)
 ├── docker/
 │   ├── base.Dockerfile             # base sandbox image (GK-2)
 │   ├── tripwire_templates/         # fake secret file layouts (GK-2)

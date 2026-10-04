@@ -6,6 +6,7 @@ from typing import Any
 from docker.errors import DockerException
 from fastapi import APIRouter, Request
 
+from gatekeeper.core import sounds
 from gatekeeper.core.sessions import ensure_session
 from gatekeeper.sandbox.environment import SandboxEnvironmentError
 from gatekeeper.sandbox.repo_images import start_repo_image_build
@@ -36,9 +37,14 @@ async def session_start(
     client: HookClient, payload: HookPayload, request: Request
 ) -> dict[str, Any]:
     """Create or refresh the session. Every source (startup, resume, compact, clear) is the same."""
-    repo_root = ensure_session(
-        request.app.state.conn, payload.session_id, payload.cwd, client.source
+    conn = request.app.state.conn
+    is_new = (
+        conn.execute("SELECT 1 FROM sessions WHERE session_id = ?", (payload.session_id,)).fetchone()
+        is None
     )
+    repo_root = ensure_session(conn, payload.session_id, payload.cwd, client.source)
+    if is_new and client == HookClient.CLAUDE:  # resumed and compacted chats already exist
+        sounds.announce_new_session()
     # On a thread: finding the build plan asks git and Docker, which must not delay the reply.
     threading.Thread(target=_start_image_build, args=(Path(repo_root),), daemon=True).start()
     return {

@@ -122,13 +122,13 @@ def _hook_group(
 
 
 def hooks_for(client: str) -> dict[str, list[dict[str, Any]]]:
-    """The four Gatekeeper hooks for Claude Code or Codex, keyed by event name."""
+    """The Gatekeeper hooks for Claude Code (five) or Codex (four), keyed by event name."""
     is_codex = client == CODEX
     tool_matcher = CODEX_TOOL_MATCHER if is_codex else CLAUDE_TOOL_MATCHER
     before_seconds = CODEX_BEFORE_TOOL_SECONDS if is_codex else CLAUDE_BEFORE_TOOL_SECONDS
     route = client
     quick = QUICK_HOOK_SECONDS
-    return {
+    hooks = {
         "SessionStart": [
             _hook_group(
                 _curl_command(f"{route}/session-start", quick, False),
@@ -148,6 +148,10 @@ def hooks_for(client: str) -> dict[str, list[dict[str, Any]]]:
             _hook_group(_curl_command(f"{route}/after-tool", quick, False), quick, tool_matcher)
         ],
     }
+    if not is_codex:
+        # Useless mode plays a sound when Claude finishes a reply.
+        hooks["Stop"] = [_hook_group(_curl_command(f"{route}/stop", quick, False), quick)]
+    return hooks
 
 
 def _is_ours(hook: dict[str, Any]) -> bool:

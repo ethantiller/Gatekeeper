@@ -44,7 +44,8 @@ def save(conn: sqlite3.Connection, decision: Decision, repo_root: Path) -> Decis
     saved = decision.model_copy(
         update={
             "summary": summarize(decision),
-            "agent_reason": agent_reason(decision, get_many(conn, decision.tainted_by)),
+            "agent_reason": decision.agent_reason
+            or agent_reason(decision, get_many(conn, decision.tainted_by)),
             "checkpoint_id": checkpoint_id if checkpoint_sha else None,
         }
     )

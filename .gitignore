@@ -25,3 +25,4 @@ node_modules
 *.pyc
 __pycache__/
 tests/
+brag-output
