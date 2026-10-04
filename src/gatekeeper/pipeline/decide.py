@@ -9,7 +9,7 @@ from google import genai
 
 from gatekeeper.core import decision_store
 from gatekeeper.pipeline import judge
-from gatekeeper.pipeline.combine import combine
+from gatekeeper.pipeline.combine import combine, serious_tags
 from gatekeeper.pipeline.parser import parse
 from gatekeeper.pipeline.rules import check_action_against_rules, load_rules
 from gatekeeper.sandbox import runner
@@ -27,6 +27,10 @@ from gatekeeper.server.types import (
 
 # An untagged command with one of these judge ratings is sandboxed before it is decided.
 SANDBOX_ESCALATION_RISKS = {RiskLevel.MEDIUM, RiskLevel.HIGH}
+
+
+# Untagged reads and writes inside the repo are allowed without the judge.
+JUDGED_UNTAGGED_KINDS = {ActionKind.RUN_COMMAND, ActionKind.FETCH_URL, ActionKind.OTHER}
 
 
 class SessionRecord(Protocol):
@@ -81,11 +85,11 @@ async def decide(
         if _needs_sandbox(action, rules, config):
             sandbox_report = await asyncio.to_thread(runner.run, action, sandbox_session)
             # A fake secret was touched: combine denies whatever the judge would say.
-            if not sandbox_report.tripwires_triggered:
+            if _needs_judge(action, rules, config) and not sandbox_report.tripwires_triggered:
                 judge_result = await judge.rate(
                     action, rules, snippets, prompt, sandbox_report, client=gemini
                 )
-        else:
+        elif _needs_judge(action, rules, config):
             judge_result = await judge.rate(action, rules, snippets, prompt, client=gemini)
             if _should_escalate(action, judge_result):
                 sandbox_report = await asyncio.to_thread(runner.run, action, sandbox_session)
@@ -106,6 +110,15 @@ async def decide(
 def _needs_sandbox(action: StandardAction, rules: RuleResult, config: dict[str, Any]) -> bool:
     sandbox_tags = set(config.get("sandbox_tags", []))
     return action.kind == ActionKind.RUN_COMMAND and bool(sandbox_tags & set(rules.tags))
+
+
+def _needs_judge(action: StandardAction, rules: RuleResult, config: dict[str, Any]) -> bool:
+    """Whether the judge is worth its cost: serious tags, or an untagged action of unknown effect."""
+    if serious_tags(rules.tags, config):
+        return True
+    if rules.tags:
+        return False  # soft tags: the sandbox (if any) is enough
+    return action.kind in JUDGED_UNTAGGED_KINDS
 
 
 def _should_escalate(action: StandardAction, judge_result: JudgeResult) -> bool:

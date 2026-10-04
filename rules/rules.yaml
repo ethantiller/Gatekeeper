@@ -155,8 +155,18 @@ tags:
 # Added by the parser, not configurable here:
 # obfuscated, unparseable, touches_secrets, edits_agent_config, outside_repo, private_network
 
-# Any matched tag asks the user, unless the tag is listed here (and the sandbox and judge
-# find nothing). Empty by default; a repo's .gatekeeper.yaml can add tags, e.g. [installs_packages].
+# Only these tags go to the judge, and they ask only if it rates the action high (or fails).
+# Other tags (network, deletes_files, installs_packages, outside_repo, ...) are checked by the
+# sandbox where one applies and otherwise run without a prompt. Not settable from a repo.
+serious_tags:
+  - touches_secrets
+  - edits_agent_config
+  - runs_new_code
+  - uses_sudo
+  - obfuscated
+  - unparseable
+
+# Serious tags the user chooses to skip review for. Empty by default.
 auto_allow_tags: []
 
 # Tags that also trigger a sandbox run; other tags go to the judge only.
