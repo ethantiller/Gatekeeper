@@ -73,7 +73,7 @@ def remember_approval(conn: sqlite3.Connection, session_id: str, action_id: str)
 def record_approval(
     conn: sqlite3.Connection, decision_id: str, *, remember: bool = False
 ) -> Decision:
-    """Mark a pending ask as approved by the user, and remember it if they chose to."""
+    """Turn a pending ask into a user-approved allow, and remember it if they chose to."""
     row = conn.execute(
         "SELECT decision_json FROM decisions WHERE decision_id = ?", (decision_id,)
     ).fetchone()
@@ -82,14 +82,26 @@ def record_approval(
     decision = Decision.model_validate_json(row["decision_json"])
     if decision.verdict != Verdict.ASK:
         raise ValueError(f"Decision {decision_id} was {decision.verdict.value}, not ask")
-    approved = decision.model_copy(update={"approved_by": "user", "agent_reason": ""})
+    approved = decision.model_copy(
+        update={
+            "verdict": Verdict.ALLOW,
+            "approved_by": "user",
+            "reasons": ["Approved by you", *decision.reasons],
+            "agent_reason": "",
+        }
+    )
+    approved = approved.model_copy(update={"summary": summarize(approved)})
     with conn:
         conn.execute(
-            "UPDATE decisions SET decision_json = ? WHERE decision_id = ?",
-            (approved.model_dump_json(), decision_id),
+            "UPDATE decisions SET verdict = ?, summary = ?, decision_json = ? WHERE decision_id = ?",
+            (approved.verdict.value, approved.summary, approved.model_dump_json(), decision_id),
         )
-    if remember:
-        remember_approval(conn, approved.session_id, approved.action.action_id)
+        if remember:
+            conn.execute(
+                "INSERT OR IGNORE INTO remembered_approvals (action_id, session_id, created_at)"
+                " VALUES (?, ?, ?)",
+                (approved.action.action_id, approved.session_id, eastern_now().isoformat()),
+            )
     return approved
 
 

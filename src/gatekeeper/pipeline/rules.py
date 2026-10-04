@@ -50,7 +50,38 @@ def load_rules(repo_path: str | Path | None = None) -> dict[str, Any]:
 
     overrides = _read_rule_config(override_path)
     allowed = {key: value for key, value in overrides.items() if key in REPOSITORY_OVERRIDE_KEYS}
+    _check_override_shape(defaults, allowed, override_path.name)
     return _merge_rule_values(defaults, allowed)
+
+
+def _check_override_shape(defaults: Any, overrides: Any, where: str) -> None:
+    """Reject overrides whose types differ from the defaults, since a merge would replace them.
+
+    Without this a repo could set `protected_files: null` and wipe the default protections.
+    """
+    if type(overrides) is not type(defaults):
+        raise TypeError(
+            f"{REPOSITORY_RULES_NAME}: '{where}' must be a {type(defaults).__name__}, "
+            f"not {type(overrides).__name__}"
+        )
+    if isinstance(defaults, dict):
+        sample = next(iter(defaults.values()), None)
+        for key, value in overrides.items():
+            reference = defaults.get(key, sample)
+            if reference is not None:
+                _check_override_shape(reference, value, f"{where}.{key}")
+    elif isinstance(defaults, list) and defaults:
+        for item in overrides:
+            _check_override_shape(defaults[0], item, f"{where}[]")
+            if isinstance(item, dict) and isinstance(item.get("pattern"), str):
+                _check_regex(item["pattern"], where)
+
+
+def _check_regex(pattern: str, where: str) -> None:
+    try:
+        re.compile(pattern)
+    except re.error as error:
+        raise ValueError(f"{REPOSITORY_RULES_NAME}: '{where}' has an invalid pattern: {error}") from error
 
 
 def _read_rule_config(path: Path) -> dict[str, Any]:
@@ -211,19 +242,23 @@ def _collect_action_risk_tags(
     return tags, reasons
 
 
-# Paths the action writes or reads directly (path argument and redirects) that leave the repo.
+# Paths the action names (path field, redirects and command arguments) that leave the repo.
 def _paths_outside_repo(
     action: StandardAction, parsed: ParsedCommand, repo_root: Path | None
 ) -> list[str]:
     boundary = Path(os.path.realpath(repo_root or action.cwd))
-    candidates = [action.path] if action.path else []
-    candidates.extend([*parsed.redirect_targets, *extract_redirect_paths(parsed.raw)])
     outside: list[str] = []
-    for candidate in candidates:
-        resolved = Path(os.path.realpath(Path(action.cwd) / _normalize_path(candidate)))
-        if not resolved.is_relative_to(boundary) and candidate not in outside:
+    for candidate in _collect_action_paths(action, parsed):
+        if candidate not in outside and _leaves_boundary(candidate, action.cwd, boundary):
             outside.append(candidate)
     return outside
+
+
+def _leaves_boundary(candidate: str, cwd: str, boundary: Path) -> bool:
+    if "\x00" in candidate:
+        return True
+    resolved = Path(os.path.realpath(Path(cwd) / _normalize_path(candidate)))
+    return not resolved.is_relative_to(boundary)
 
 
 # Loopback, private, link-local and similar addresses, plus the names that point at them.

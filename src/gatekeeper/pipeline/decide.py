@@ -22,6 +22,7 @@ from gatekeeper.server.types import (
     SandboxSession,
     StandardAction,
     UntrustedRead,
+    Verdict,
 )
 
 # An untagged command with one of these judge ratings is sandboxed before it is decided.
@@ -56,6 +57,8 @@ async def decide(
     # A hook retry reuses the action id; return what was decided instead of deciding twice.
     existing = decision_store.find_by_action(conn, action.action_id)
     if existing is not None:
+        if existing.verdict == Verdict.ASK and decision_store.is_remembered(conn, action.action_id):
+            return decision_store.record_approval(conn, existing.decision_id)
         return existing
 
     config = load_rules(session.repo_root)
