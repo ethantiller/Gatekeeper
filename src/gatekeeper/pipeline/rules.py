@@ -1,3 +1,5 @@
+"""Load layered Gatekeeper rules and classify actions before review."""
+
 from __future__ import annotations
 
 import re
@@ -9,6 +11,7 @@ from typing import Any
 
 import yaml
 
+from gatekeeper.pipeline.parser import extract_hosts, parse
 from gatekeeper.server.types import (
     ActionKind,
     ParsedCommand,
@@ -17,25 +20,23 @@ from gatekeeper.server.types import (
     Verdict,
 )
 
-from .parser import extract_hosts, parse
-
 DEFAULT_RULES_PATH = Path(__file__).resolve().parents[3] / "rules" / "rules.yaml"
 REPOSITORY_RULES_NAME = ".gatekeeper.yaml"
 
 
 def load_rules(repo_path: str | Path | None = None) -> dict[str, Any]:
     """Load default rules and overlay a repository's optional rule file."""
-    defaults = _read_rules(DEFAULT_RULES_PATH)
+    defaults = _read_rule_config(DEFAULT_RULES_PATH)
     repository = Path.cwd() if repo_path is None else Path(repo_path)
     override_path = repository / REPOSITORY_RULES_NAME
 
     if not override_path.exists():
         return defaults
 
-    return _merge(defaults, _read_rules(override_path))
+    return _merge_rule_values(defaults, _read_rule_config(override_path))
 
 
-def _read_rules(path: Path) -> dict[str, Any]:
+def _read_rule_config(path: Path) -> dict[str, Any]:
     try:
         with path.open(encoding="utf-8") as rules_file:
             rules = yaml.safe_load(rules_file)
@@ -50,12 +51,12 @@ def _read_rules(path: Path) -> dict[str, Any]:
     return rules
 
 
-def _merge(defaults: Any, overrides: Any) -> Any:
+def _merge_rule_values(defaults: Any, overrides: Any) -> Any:
     if isinstance(defaults, dict) and isinstance(overrides, dict):
         merged = deepcopy(defaults)
         for key, value in overrides.items():
             if key in merged:
-                merged[key] = _merge(merged[key], value)
+                merged[key] = _merge_rule_values(merged[key], value)
             else:
                 merged[key] = deepcopy(value)
         return merged
@@ -66,7 +67,7 @@ def _merge(defaults: Any, overrides: Any) -> Any:
     return deepcopy(overrides)
 
 
-def check(
+def check_action_against_rules(
     action: StandardAction,
     parsed: ParsedCommand | None = None,
     rules: dict[str, Any] | None = None,
@@ -76,7 +77,9 @@ def check(
     config = load_rules(action.cwd) if rules is None else rules
 
     matched_rules = [
-        rule for rule in config.get("never_allowed", []) if _matches_never_allowed(rule, action, parsed)
+        rule
+        for rule in config.get("never_allowed", [])
+        if _matches_never_allowed_rule(rule, action, parsed)
     ]
     if matched_rules:
         return RuleResult(
@@ -89,29 +92,29 @@ def check(
     reasons: list[str] = []
     configured_tags = config.get("tags", {})
     for tag_name, tag_rules in configured_tags.items():
-        if _matches_tag(tag_rules, parsed.argv):
+        if _matches_configured_tag(tag_rules, parsed.argv):
             tags.add(str(tag_name))
             reasons.append(f"Matched configured {tag_name} tag")
 
-    programs = {_normalize_program(program) for program in parsed.programs}
+    programs = {_normalize_executable_name(program) for program in parsed.programs}
     if parsed.parse_error:
         tags.add("unparseable")
         reasons.append("The command could not be parsed safely")
 
-    if "eval" in programs or _is_base64_to_shell(parsed) or _is_download_to_shell(parsed):
+    if "eval" in programs or _is_base64_decode_piped_to_shell(parsed) or _is_download_piped_to_shell(parsed):
         tags.add("obfuscated")
         reasons.append("The command evaluates or pipes dynamically obtained code to a shell")
-    if _is_download_to_shell(parsed):
+    if _is_download_piped_to_shell(parsed):
         tags.add("runs_new_code")
         reasons.append("The command pipes downloaded content to a shell")
 
-    touched_paths = _touched_paths(action, parsed)
-    if any(_matches_any_path(path, config.get("protected_files", []), action.cwd) for path in touched_paths):
+    touched_paths = _collect_action_paths(action, parsed)
+    if any(_path_matches_pattern(path, config.get("protected_files", []), action.cwd) for path in touched_paths):
         tags.add("touches_secrets")
         reasons.append("The action touches a protected file")
 
-    if _writes_files(action, parsed) and any(
-        _matches_any_path(path, config.get("agent_config_paths", []), action.cwd)
+    if _action_writes_files(action, parsed) and any(
+        _path_matches_pattern(path, config.get("agent_config_paths", []), action.cwd)
         for path in touched_paths
     ):
         tags.add("edits_agent_config")
@@ -121,7 +124,7 @@ def check(
     if hosts:
         tags.add("network")
         allowed_hosts = [str(host).lower() for host in config.get("allowed_hosts", [])]
-        unknown_hosts = [host for host in hosts if not _host_is_allowed(host, allowed_hosts)]
+        unknown_hosts = [host for host in hosts if not _host_matches_allowlist(host, allowed_hosts)]
         if unknown_hosts:
             reasons.append(f"Network host is not in allowed_hosts: {', '.join(unknown_hosts)}")
 
@@ -135,7 +138,7 @@ def check(
 
     safe_commands = config.get("safe_commands", [])
     if parsed.argv and not parsed.parse_error and all(
-        any(_command_matches(entry, command) for entry in safe_commands)
+        any(_command_matches_prefix(entry, command) for entry in safe_commands)
         for command in parsed.argv
     ):
         return RuleResult(
@@ -146,7 +149,8 @@ def check(
     return RuleResult()
 
 
-def _matches_never_allowed(
+# Check for never allowed rules
+def _matches_never_allowed_rule(
     rule: dict[str, Any], action: StandardAction, parsed: ParsedCommand
 ) -> bool:
     text = "\n".join(value for value in (parsed.raw, action.path, action.url) if value)
@@ -155,28 +159,29 @@ def _matches_never_allowed(
         return True
 
     entries = [*rule.get("programs", []), *rule.get("commands", [])]
-    return any(_command_matches(entry, command) for entry in entries for command in parsed.argv)
+    return any(_command_matches_prefix(entry, command) for entry in entries for command in parsed.argv)
 
 
-def _matches_tag(tag_rules: Any, argv: list[list[str]]) -> bool:
+# Check for configured tag rules
+def _matches_configured_tag(tag_rules: Any, argv: list[list[str]]) -> bool:
     if not isinstance(tag_rules, dict):
         return False
 
     for program in tag_rules.get("programs", []):
-        normalized = _normalize_program(str(program))
-        if any(_program_of(command) == normalized for command in argv):
+        normalized = _normalize_executable_name(str(program))
+        if any(_program_name_from_argv(command) == normalized for command in argv):
             return True
 
     for entry in tag_rules.get("commands", []):
-        if any(_command_matches(str(entry), command) for command in argv):
+        if any(_command_matches_prefix(str(entry), command) for command in argv):
             return True
 
     flags = tag_rules.get("flags", {})
     if isinstance(flags, dict):
         for program, program_flags in flags.items():
-            normalized = _normalize_program(str(program))
+            normalized = _normalize_executable_name(str(program))
             if any(
-                _program_of(command) == normalized
+                _program_name_from_argv(command) == normalized
                 and any(flag in command[1:] for flag in program_flags)
                 for command in argv
             ):
@@ -185,14 +190,16 @@ def _matches_tag(tag_rules: Any, argv: list[list[str]]) -> bool:
     return False
 
 
-def _program_of(argv: list[str]) -> str | None:
+# Get the program name from the argv list
+def _program_name_from_argv(argv: list[str]) -> str | None:
     for argument in argv:
         if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", argument):
-            return _normalize_program(argument)
+            return _normalize_executable_name(argument)
     return None
 
 
-def _normalize_program(program: str) -> str:
+# Get the normalized executable name from the program string
+def _normalize_executable_name(program: str) -> str:
     normalized = program.replace("\\", "/").rsplit("/", 1)[-1].casefold()
     for suffix in (".exe", ".cmd", ".bat"):
         if normalized.endswith(suffix):
@@ -200,7 +207,8 @@ def _normalize_program(program: str) -> str:
     return normalized
 
 
-def _command_matches(entry: Any, argv: list[str]) -> bool:
+# Check if the command matches the given prefix
+def _command_matches_prefix(entry: Any, argv: list[str]) -> bool:
     if not isinstance(entry, str):
         return False
     try:
@@ -215,40 +223,43 @@ def _command_matches(entry: Any, argv: list[str]) -> bool:
         actual.pop(0)
     if len(actual) < len(expected):
         return False
-    actual[0] = _normalize_program(actual[0])
-    expected[0] = _normalize_program(expected[0])
+    actual[0] = _normalize_executable_name(actual[0])
+    expected[0] = _normalize_executable_name(expected[0])
     return [part.casefold() for part in actual[: len(expected)]] == [
         part.casefold() for part in expected
     ]
 
 
-def _is_base64_to_shell(parsed: ParsedCommand) -> bool:
+# Check if a base64 decode command is piped to a shell command
+def _is_base64_decode_piped_to_shell(parsed: ParsedCommand) -> bool:
     if not parsed.has_pipe:
         return False
     decoder_index = None
     for index, command in enumerate(parsed.argv):
-        if _program_of(command) == "base64" and any(
+        if _program_name_from_argv(command) == "base64" and any(
             argument in {"-d", "--decode", "-D"} for argument in command[1:]
         ):
             decoder_index = index
-        elif decoder_index is not None and _program_of(command) in {"sh", "bash", "zsh", "dash"}:
+        elif decoder_index is not None and _program_name_from_argv(command) in {"sh", "bash", "zsh", "dash"}:
             return True
     return False
 
 
-def _is_download_to_shell(parsed: ParsedCommand) -> bool:
+# Check if a download command is piped to a shell command
+def _is_download_piped_to_shell(parsed: ParsedCommand) -> bool:
     if not parsed.has_pipe:
         return False
     download_index = None
     for index, command in enumerate(parsed.argv):
-        if _program_of(command) in {"curl", "wget"}:
+        if _program_name_from_argv(command) in {"curl", "wget"}:
             download_index = index
-        elif download_index is not None and _program_of(command) in {"sh", "bash", "zsh", "dash"}:
+        elif download_index is not None and _program_name_from_argv(command) in {"sh", "bash", "zsh", "dash"}:
             return True
     return False
 
 
-def _touched_paths(action: StandardAction, parsed: ParsedCommand) -> list[str]:
+# Collect all relevant file paths from the action and parsed command
+def _collect_action_paths(action: StandardAction, parsed: ParsedCommand) -> list[str]:
     paths: list[str] = []
     if action.path:
         paths.append(action.path)
@@ -257,7 +268,8 @@ def _touched_paths(action: StandardAction, parsed: ParsedCommand) -> list[str]:
     return paths
 
 
-def _writes_files(action: StandardAction, parsed: ParsedCommand) -> bool:
+# Check if the action writes to files
+def _action_writes_files(action: StandardAction, parsed: ParsedCommand) -> bool:
     tool_name = action.tool_name.casefold()
     return (
         action.kind == ActionKind.WRITE_FILE
@@ -266,7 +278,8 @@ def _writes_files(action: StandardAction, parsed: ParsedCommand) -> bool:
     )
 
 
-def _matches_any_path(path: str, patterns: Any, cwd: str) -> bool:
+# Check if a given path matches any of the specified patterns
+def _path_matches_pattern(path: str, patterns: Any, cwd: str) -> bool:
     normalized_path = _normalize_path(path)
     candidates = {normalized_path}
     normalized_cwd = _normalize_path(cwd).rstrip("/")
@@ -280,6 +293,7 @@ def _matches_any_path(path: str, patterns: Any, cwd: str) -> bool:
     return False
 
 
+# Normalize a file path, expanding home directory and environment variables
 def _normalize_path(path: str) -> str:
     home = str(Path.home()).replace("\\", "/")
     expanded = path.replace("${HOME}", home).replace("$HOME", home)
@@ -288,5 +302,7 @@ def _normalize_path(path: str) -> str:
     return expanded.replace("\\", "/")
 
 
-def _host_is_allowed(host: str, allowed_hosts: list[str]) -> bool:
+
+# Check if a host matches the allowed hosts list
+def _host_matches_allowlist(host: str, allowed_hosts: list[str]) -> bool:
     return any(fnmatchcase(host.casefold(), allowed.casefold()) for allowed in allowed_hosts)
