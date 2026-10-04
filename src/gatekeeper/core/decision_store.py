@@ -2,6 +2,7 @@
 
 import logging
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 
 from gatekeeper.core.checkpoints import CheckpointError, create_checkpoint
@@ -64,19 +65,119 @@ def save(conn: sqlite3.Connection, decision: Decision, repo_root: Path) -> Decis
             ),
         )
         if checkpoint_sha:
-            conn.execute(
-                "INSERT INTO checkpoints (checkpoint_id, session_id, decision_id, repo_path,"
-                " git_ref, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    checkpoint_id,
-                    saved.session_id,
-                    saved.decision_id,
-                    str(repo_root),
-                    checkpoint_sha,
-                    eastern_now().isoformat(),
-                ),
+            _insert_checkpoint(
+                conn, checkpoint_id, saved.session_id, repo_root, checkpoint_sha, saved.decision_id
             )
     return saved
+
+
+MIN_PREFIX_LENGTH = 8
+
+
+@dataclass(frozen=True)
+class Checkpoint:
+    """A stored git checkpoint row."""
+
+    checkpoint_id: str
+    session_id: str
+    repo_path: str
+    git_ref: str
+    created_at: str
+    rolled_back_at: str | None
+
+
+def _insert_checkpoint(
+    conn: sqlite3.Connection,
+    checkpoint_id: str,
+    session_id: str,
+    repo_root: Path,
+    sha: str,
+    decision_id: str | None,
+) -> None:
+    conn.execute(
+        "INSERT INTO checkpoints (checkpoint_id, session_id, decision_id, repo_path,"
+        " git_ref, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (checkpoint_id, session_id, decision_id, str(repo_root), sha, eastern_now().isoformat()),
+    )
+
+
+def save_checkpoint(
+    conn: sqlite3.Connection,
+    checkpoint_id: str,
+    session_id: str,
+    repo_root: Path,
+    sha: str,
+    decision_id: str | None = None,
+) -> None:
+    """Store a checkpoint that belongs to no decision, such as a rollback's safety checkpoint."""
+    with conn:
+        _insert_checkpoint(conn, checkpoint_id, session_id, repo_root, sha, decision_id)
+
+
+def find_checkpoint(conn: sqlite3.Connection, decision_id: str) -> Checkpoint | None:
+    """The checkpoint taken for this decision, or None."""
+    row = conn.execute(
+        "SELECT checkpoint_id, session_id, repo_path, git_ref, created_at, rolled_back_at"
+        " FROM checkpoints WHERE decision_id = ?",
+        (decision_id,),
+    ).fetchone()
+    return Checkpoint(**dict(row)) if row else None
+
+
+def mark_rolled_back(conn: sqlite3.Connection, checkpoint_id: str) -> None:
+    """Record that the checkpoint was rolled back; raises if it already was."""
+    with conn:
+        updated = conn.execute(
+            "UPDATE checkpoints SET rolled_back_at = ? WHERE checkpoint_id = ?"
+            " AND rolled_back_at IS NULL",
+            (eastern_now().isoformat(), checkpoint_id),
+        ).rowcount
+    if updated == 0:
+        raise ValueError(f"Checkpoint {checkpoint_id} was already rolled back")
+
+
+def find_decision(conn: sqlite3.Connection, id_or_prefix: str) -> Decision:
+    """The decision with this id, or the only one starting with this prefix (8+ characters)."""
+    rows = conn.execute(
+        "SELECT decision_json FROM decisions WHERE decision_id = ?", (id_or_prefix,)
+    ).fetchall()
+    if not rows:
+        if len(id_or_prefix) < MIN_PREFIX_LENGTH:
+            raise KeyError(f"No decision {id_or_prefix} (a prefix needs {MIN_PREFIX_LENGTH}+ characters)")
+        rows = conn.execute(
+            "SELECT decision_json FROM decisions WHERE substr(decision_id, 1, ?) = ?",
+            (len(id_or_prefix), id_or_prefix),
+        ).fetchall()
+    if not rows:
+        raise KeyError(f"No decision {id_or_prefix}")
+    decisions = [Decision.model_validate_json(row["decision_json"]) for row in rows]
+    if len(decisions) > 1:
+        matches = ", ".join(decision.decision_id for decision in decisions)
+        raise ValueError(f"{id_or_prefix} matches more than one decision: {matches}")
+    return decisions[0]
+
+
+def list_decisions(
+    conn: sqlite3.Connection, session_id: str | None, limit: int
+) -> list[sqlite3.Row]:
+    """The newest decisions (all sessions when `session_id` is None), newest first."""
+    where = "WHERE session_id = ?" if session_id else ""
+    arguments = (session_id, limit) if session_id else (limit,)
+    return conn.execute(
+        "SELECT created_at, decision_id, verdict, summary,"
+        " json_extract(decision_json, '$.approved_by') AS approved_by"
+        f" FROM decisions {where} ORDER BY created_at DESC LIMIT ?",
+        arguments,
+    ).fetchall()
+
+
+def latest_session_for_repo(conn: sqlite3.Connection, repo_root: str) -> str | None:
+    """The most recently started session in this repo, or None."""
+    row = conn.execute(
+        "SELECT session_id FROM sessions WHERE repo_root = ? ORDER BY started_at DESC LIMIT 1",
+        (repo_root,),
+    ).fetchone()
+    return row["session_id"] if row else None
 
 
 def remember_approval(conn: sqlite3.Connection, session_id: str, action_id: str) -> None:
