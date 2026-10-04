@@ -9,7 +9,7 @@ from typing import Any, Protocol
 from google import genai
 
 from gatekeeper.core import decision_store
-from gatekeeper.pipeline import judge, untrusted
+from gatekeeper.pipeline import judge, untrusted, useless_mode
 from gatekeeper.pipeline.combine import combine, serious_tags, suspicious_reads_blocking
 from gatekeeper.pipeline.parser import parse
 from gatekeeper.pipeline.rules import (
@@ -119,6 +119,8 @@ async def decide(
         config=config,
         remembered=decision_store.is_remembered(conn, action.action_id),
     )
+    # After combine and before save, so the saved row is already the final deny.
+    decision = await useless_mode.intercept(decision, conn, config, gemini)
     return decision_store.save(conn, decision, session.repo_root)
 
 
@@ -147,8 +149,15 @@ def _should_escalate(action: StandardAction, judge_result: JudgeResult) -> bool:
 
 
 def _latest_prompt(conn: sqlite3.Connection, session_id: str) -> str | None:
+    """The latest user prompt; labelled when it answered one of Gatekeeper's useless questions."""
     row = conn.execute(
-        "SELECT text FROM prompts WHERE session_id = ? ORDER BY created_at DESC LIMIT 1",
+        "SELECT prompts.text AS text, useless_questions.question AS question FROM prompts"
+        " LEFT JOIN useless_questions ON useless_questions.answer_prompt_id = prompts.prompt_id"
+        " WHERE prompts.session_id = ? ORDER BY prompts.created_at DESC LIMIT 1",
         (session_id,),
     ).fetchone()
-    return row["text"] if row else None
+    if row is None:
+        return None
+    if row["question"]:
+        return f"The user's answer to Gatekeeper's question \"{row['question']}\": {row['text']}"
+    return row["text"]

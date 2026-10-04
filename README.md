@@ -16,7 +16,8 @@ gatekeeper/
 │   ├── database.py                 # SQLite connection, WAL mode, runs migrations (GK-1)
 │   ├── migrations/
 │   │   ├── 0001_initial.sql        # the five tables: sessions, prompts, untrusted_reads, decisions, checkpoints (GK-1)
-│   │   └── 0004_untrusted_snippets.sql  # sequence, score and snippet on untrusted_reads (GK-8)
+│   │   ├── 0004_untrusted_snippets.sql  # sequence, score and snippet on untrusted_reads (GK-8)
+│   │   └── 0005_useless_questions.sql   # questions useless mode asked and the answers (GK-10)
 │   ├── server/
 │   │   ├── types.py                # shared Pydantic types (GK-1)
 │   │   ├── main.py                 # server startup and route mounting (GK-1)
@@ -43,6 +44,7 @@ gatekeeper/
 │   │   ├── rate_action_risk.py     # LLM risk rating request (GK-5)
 │   │   ├── combine.py              # if/else that produces the final verdict (GK-5)
 │   │   └── useless_mode.py         # sarcastic question generation (GK-10)
+│   ├── assets/brainrot/            # brain rot sounds for useless mode, with CREDITS.md (GK-10)
 │   ├── sandbox/
 │   │   ├── repo_images.py          # builds and caches repo images (GK-4)
 │   │   ├── runner.py               # runs a command in a container (GK-4)
@@ -54,7 +56,9 @@ gatekeeper/
 │       ├── init.py                 # gatekeeper init (GK-12)
 │       ├── approve.py              # gatekeeper approve (GK-7)
 │       ├── review.py               # gatekeeper log, show, rollback (GK-11)
-│       └── dev.py                  # gatekeeper sandbox-test, fun on|off (GK-4, GK-10)
+│       ├── dev.py                  # gatekeeper sandbox-test (GK-4)
+│       ├── fun.py                  # gatekeeper fun on|off|watch (GK-10)
+│       └── brainrot.py             # brain rot sounds and random scares (GK-10)
 ├── docker/
 │   ├── base.Dockerfile             # base sandbox image (GK-2)
 │   ├── tripwire_templates/         # fake secret file layouts (GK-2)
