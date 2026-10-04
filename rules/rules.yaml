@@ -20,6 +20,12 @@ never_allowed:
   - id: wipe-disk
     reason: Formats or overwrites a disk
     programs: [mkfs, dd, shred, wipefs, diskutil eraseDisk]
+  - id: make-filesystem
+    reason: Formats a disk (mkfs.ext4 and the other mkfs.* variants)
+    pattern: '(^|[\s;&|(])mkfs(\.\w+)?(\s|$)'
+  - id: cloud-metadata
+    reason: Reads cloud credentials from the instance metadata service
+    pattern: '169\.254\.169\.254|metadata\.google\.internal|fd00:ec2::254'
   - id: fork-bomb
     reason: Spawns processes until the machine locks up
     pattern: ':\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:'
@@ -131,7 +137,14 @@ tags:
       - apt-get install
   runs_new_code:
     # Also applies to scripts or binaries created or changed during this session.
-    programs: [npx, uvx, bunx, make]
+    programs: [npx, uvx, bunx, make, docker, podman]
+    commands:
+      - python -c
+      - python3 -c
+      - node -e
+      - bash -c
+      - sh -c
+      - zsh -c
     flags:
       find: [-exec, -execdir]
   changes_permissions:
@@ -140,7 +153,11 @@ tags:
     programs: [sudo, su, doas]
 
 # Added by the parser, not configurable here:
-# obfuscated, unparseable, touches_secrets, edits_agent_config
+# obfuscated, unparseable, touches_secrets, edits_agent_config, outside_repo, private_network
+
+# Any matched tag asks the user, unless the tag is listed here (and the sandbox and judge
+# find nothing). Empty by default; a repo's .gatekeeper.yaml can add tags, e.g. [installs_packages].
+auto_allow_tags: []
 
 # Tags that also trigger a sandbox run; other tags go to the judge only.
 sandbox_tags:
