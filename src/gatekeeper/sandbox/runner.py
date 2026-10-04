@@ -1,0 +1,641 @@
+"""Runs one command from an agent in a throwaway container and reports what it did."""
+
+import os
+import posixpath
+import shlex
+import subprocess
+import tarfile
+import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import IO
+from uuid import uuid4
+
+from docker.client import DockerClient
+from docker.errors import APIError, ImageNotFound, NotFound
+from docker.models.containers import Container
+
+from gatekeeper.sandbox.environment import (
+    EXIT_SUCCESS,
+    LOGGER_NAME,
+    LOGGER_PORT,
+    NETWORK_NAME,
+    SandboxEnvironmentError,
+    base_image_tag,
+    ca_certificate_archive,
+    ensure_environment,
+    get_docker_client,
+    proxy_environment,
+    read_connection_log,
+    register_tripwires,
+    sandbox_container_labels,
+    unregister_tripwires,
+)
+from gatekeeper.sandbox.strace_log import (
+    TRACED_SYSCALLS,
+    StraceFindings,
+    parse_strace_log,
+)
+from gatekeeper.sandbox.tripwires import (
+    AWS_CREDENTIALS_PATH,
+    SANDBOX_GID,
+    SANDBOX_UID,
+    WORKSPACE_ENV_PATH,
+    build_tripwire_archive,
+    generate_tripwire_values,
+)
+from gatekeeper.server.types import SandboxReport, SandboxSession, StandardAction
+
+WORKSPACE = "/workspace"
+RUN_TIMEOUT_SECONDS = 30
+KILL_GRACE_SECONDS = 2
+HARD_DEADLINE_SECONDS = RUN_TIMEOUT_SECONDS + KILL_GRACE_SECONDS + 5
+POLL_SECONDS = 0.02
+ORPHAN_CHECK_AFTER_SECONDS = 1.0
+ORPHAN_POLL_SECONDS = 0.25
+OUTPUT_TAIL_BYTES = 4096
+REDACTION_MARGIN_BYTES = 128  # read a little extra so a secret cut by the tail is still redacted
+MAX_FILE_SIZE_KIB = 262144  # per file the command writes; stops one command filling the disk
+CPU_LIMIT_NANO_CPUS = 1_000_000_000
+MEMORY_LIMIT = "1g"
+PIDS_LIMIT = 256
+STRACE_LOG_PATH = "/tmp/gk-strace.log"
+RUN_MARKER_PATH = "/tmp/gk-run-marker"
+EXIT_CODE_PATH = "/tmp/gk-exit"
+STDOUT_PATH = "/tmp/gk-stdout"
+STDERR_PATH = "/tmp/gk-stderr"
+DISK_LIMIT_BYTES = 2 * 1024**3  # what the command may add to the container's writable layer
+DISK_CHECK_SECONDS = 1.0
+# PID 1 (`sleep infinity`) ignores SIGKILL from inside its own namespace, so the container survives.
+KILL_ALL_COMMAND = ["sh", "-c", "kill -9 -1"]
+SETUP_WORKERS = 5
+LOGGER_SETTLE_POLL_SECONDS = 0.25
+LOGGER_SETTLE_MAX_SECONDS = 2.0
+KILLED_EXIT_CODES = (124, 137)  # `timeout` stopped the command, or had to force-kill it
+
+DIFF_ADDED = 1
+DIFF_DELETED = 2
+
+TRIPWIRE_PATHS = (WORKSPACE_ENV_PATH, AWS_CREDENTIALS_PATH)
+SYSTEM_PROGRAM_DIRECTORIES = ("/bin", "/sbin", "/usr/bin", "/usr/sbin", "/usr/local/bin")
+
+# The agent's command comes in through $GK_COMMAND so it never needs shell quoting. `timeout`
+# is outside `strace` because strace waits for background processes the command leaves behind;
+# the exit status goes to a file because that is the only reliable sign the command finished.
+COMMAND_VARIABLE = "GK_COMMAND"
+_INNER_SCRIPT = (
+    f'ulimit -f {MAX_FILE_SIZE_KIB}; bash -c "${COMMAND_VARIABLE}"; echo $? >{EXIT_CODE_PATH}'
+)
+WRAPPER_SCRIPT = (
+    f"timeout --kill-after={KILL_GRACE_SECONDS} {RUN_TIMEOUT_SECONDS} "
+    f"strace -f -y -e trace={TRACED_SYSCALLS} -o {STRACE_LOG_PATH} "
+    f"bash -c '{_INNER_SCRIPT}' >{STDOUT_PATH} 2>{STDERR_PATH}"
+)
+
+
+def run(action: StandardAction, session: SandboxSession) -> SandboxReport:
+    """Run the action's command in a container and report. Sandbox failures go in report.error."""
+    if not action.command:
+        return SandboxReport(image=base_image_tag(), error="The action has no command to run.")
+    try:
+        return _run_in_container(action, action.command, session)
+    except SandboxEnvironmentError as exc:
+        return SandboxReport(image=base_image_tag(), error=str(exc))
+
+
+def _container_workdir(cwd: str, repo_root: Path, warnings: list[str]) -> str:
+    """Where in the container the command starts: the folder the agent was in, inside the repo."""
+    try:
+        relative = Path(cwd).resolve().relative_to(repo_root.resolve())
+    except ValueError:
+        warnings.append(f"The command's folder {cwd} is outside the repo; ran from the repo root.")
+        return WORKSPACE
+    return posixpath.normpath(posixpath.join(WORKSPACE, relative.as_posix()))
+
+
+def _existing_workdir(container: Container, workdir: str, warnings: list[str]) -> str:
+    missing = container.exec_run(["test", "-d", workdir]).exit_code != EXIT_SUCCESS
+    if workdir != WORKSPACE and missing:
+        warnings.append(f"{workdir} is not in the sandbox; ran from the repo root.")
+        return WORKSPACE
+    return workdir
+
+
+def _run_in_container(
+    action: StandardAction, command: str, session: SandboxSession
+) -> SandboxReport:
+    ensure_environment()
+    warnings: list[str] = []
+    repo_file_paths = _list_repo_files(session.repo_root)
+    image = base_image_tag()
+    workdir = _container_workdir(action.cwd, session.repo_root, warnings)
+    warnings += _host_path_warnings(command, Path(action.cwd), session.repo_root, repo_file_paths)
+    client = get_docker_client()
+    started_at = time.time()
+
+    # One label per run: two runs of the same session must not unregister each other's values.
+    run_label = f"{session.session_id}-{uuid4().hex[:8]}"
+    resources = _RunResources()
+    try:
+        # The logger must know the fake values before the command can send them anywhere.
+        _set_up(resources, client, image, session, run_label, repo_file_paths)
+        sandbox_container = resources.container
+        sandbox_container.start()
+        client_ip = _container_ip(sandbox_container)
+        proxy_address = (_logger_ip(client), LOGGER_PORT)
+        workdir = _existing_workdir(sandbox_container, workdir, warnings)
+        observation = _observe_run(client, sandbox_container, command, workdir)
+        # Read while the values are still registered: late events can still be scanned.
+        records = _read_settled_log(started_at, client_ip, observation.strace_log, warnings)
+    except ImageNotFound as exc:
+        raise SandboxEnvironmentError(f"The sandbox image {image} is missing: {exc}") from exc
+    except APIError as exc:
+        raise SandboxEnvironmentError(f"Docker failed while running the command: {exc}") from exc
+    finally:
+        _release(resources, run_label)
+
+    return _build_report(
+        _RunEvidence(
+            image=image,
+            observation=observation,
+            findings=parse_strace_log(observation.strace_log, {proxy_address}),
+            records=records,
+            run_label=run_label,
+            tripwire_seed=session.tripwire_seed,
+            warnings=warnings,
+        )
+    )
+
+
+@dataclass
+class _RunResources:
+    """What a run created, so cleanup can release it even if setup stopped half way."""
+
+    container: Container | None = None
+    archives: list[IO[bytes] | bytes] = field(default_factory=list)
+
+
+def _set_up(
+    resources: _RunResources,
+    client: DockerClient,
+    image: str,
+    session: SandboxSession,
+    run_label: str,
+    repo_file_paths: list[str],
+) -> None:
+    """Create the container, build the three tars and register the tripwires at the same time,
+    then copy the tars in.
+    """
+    with ThreadPoolExecutor(max_workers=SETUP_WORKERS) as pool:
+        container_future = pool.submit(_create_container, client, image)
+        register_future = pool.submit(register_tripwires, run_label, session.tripwire_seed)
+        repo_future = pool.submit(_build_repo_copy_archive, session.repo_root, repo_file_paths)
+        # A repo that ships its own .env must not be overwritten by the planted one.
+        secrets_future = pool.submit(
+            build_tripwire_archive, session.tripwire_seed, skip_workspace_env=".env" in repo_file_paths
+        )
+        ca_future = pool.submit(ca_certificate_archive)
+    # Everything has finished. Record what succeeded before raising, so cleanup can release it.
+    if container_future.exception() is None:
+        resources.container = container_future.result()
+    for archive_future in (repo_future, secrets_future, ca_future):
+        if archive_future.exception() is None:
+            resources.archives.append(archive_future.result())
+    for future in (container_future, register_future, repo_future, secrets_future, ca_future):
+        future.result()  # raises the first failure
+    _copy_into_container(container_future.result(), resources.archives)
+
+
+def _release(resources: _RunResources, run_label: str) -> None:
+    """Unregister the tripwires, remove the container and close the temp files; each step runs
+    even if an earlier one fails."""
+    try:
+        unregister_tripwires(run_label)
+    finally:
+        try:
+            if resources.container is not None:
+                _remove_container(resources.container)
+        finally:
+            for archive in resources.archives:
+                if not isinstance(archive, bytes):
+                    archive.close()
+
+
+def _read_settled_log(
+    started_at: float, client_ip: str, strace_log: str, warnings: list[str]
+) -> list[dict]:
+    """Connection records for this run. A dead logger gives a partial report plus a warning.
+
+    The logger can write a late event (such as a failed TLS handshake) after the command has
+    ended, so when the command connected anywhere this waits for the record count to stop growing.
+    """
+    try:
+        records = read_connection_log(started_at, client_ip=client_ip)
+        if "connect(" not in strace_log:
+            return records
+        deadline = time.monotonic() + LOGGER_SETTLE_MAX_SECONDS
+        while time.monotonic() < deadline:
+            time.sleep(LOGGER_SETTLE_POLL_SECONDS)
+            latest = read_connection_log(started_at, client_ip=client_ip)
+            if len(latest) == len(records):
+                return latest
+            records = latest
+        return records
+    except SandboxEnvironmentError as exc:
+        warnings.append(
+            f"The connection log could not be read, so hosts contacted and secrets sent are "
+            f"unknown: {exc}"
+        )
+        return []
+
+
+def _copy_into_container(container: Container, archives: list[IO[bytes] | bytes]) -> None:
+    for archive in archives:
+        if not container.put_archive("/", archive):
+            raise SandboxEnvironmentError("Docker did not accept files copied into the sandbox.")
+
+
+def _container_ip(container: Container) -> str:
+    """The container's address on the sandbox network. Only available while it is running."""
+    container.reload()
+    return container.attrs["NetworkSettings"]["Networks"][NETWORK_NAME]["IPAddress"]
+
+
+def _logger_ip(client: DockerClient) -> str:
+    return _container_ip(client.containers.get(LOGGER_NAME))
+
+
+@dataclass(frozen=True)
+class _CommandResult:
+    exit_code: int | None  # None if the command never finished
+    timed_out: bool
+    ended_abnormally: bool  # no exit status recorded, but not a timeout (killed, or strace failed)
+    left_processes: bool  # the command finished but background processes were still running
+    disk_limit_hit: bool = False  # stopped for writing more than DISK_LIMIT_BYTES
+
+
+@dataclass(frozen=True)
+class _RunObservation:
+    """Everything measured inside the container while the command ran."""
+
+    result: _CommandResult
+    stdout: bytes
+    stderr: bytes
+    duration_ms: int
+    files_created: list[str]
+    files_modified: list[str]
+    files_deleted: list[str]
+    strace_log: str
+
+
+@dataclass(frozen=True)
+class _RunEvidence:
+    """Everything the report is built from."""
+
+    image: str
+    observation: _RunObservation
+    findings: StraceFindings
+    records: list[dict]
+    run_label: str
+    tripwire_seed: str
+    warnings: list[str]
+
+
+def _observe_run(
+    client: DockerClient, container: Container, command: str, workdir: str
+) -> _RunObservation:
+    """Run the command under strace and collect the file changes around it."""
+    files_before = _workspace_diff(container)
+    _run_checked(container, ["touch", RUN_MARKER_PATH])
+
+    start = time.monotonic()
+    result = _exec_traced(client, container, command, workdir)
+    duration_ms = int((time.monotonic() - start) * 1000)
+
+    files_after = _workspace_diff(container)
+    added_before = _paths_of_kind(files_before, DIFF_ADDED)
+    added_after = _paths_of_kind(files_after, DIFF_ADDED)
+    deleted_before = _paths_of_kind(files_before, DIFF_DELETED)
+    deleted_after = _paths_of_kind(files_after, DIFF_DELETED)
+    files_created = sorted(added_after - added_before)
+    tail_bytes = OUTPUT_TAIL_BYTES + REDACTION_MARGIN_BYTES
+    return _RunObservation(
+        result=result,
+        stdout=_read_tail(container, STDOUT_PATH, tail_bytes),
+        stderr=_read_tail(container, STDERR_PATH, tail_bytes),
+        duration_ms=duration_ms,
+        files_created=files_created,
+        files_modified=_modified_files(container, set(files_created)),
+        files_deleted=sorted((added_before - added_after) | (deleted_after - deleted_before)),
+        strace_log=_read_tail(container, STRACE_LOG_PATH, None).decode(errors="replace"),
+    )
+
+
+def _build_report(evidence: _RunEvidence) -> SandboxReport:
+    observation = evidence.observation
+    result = observation.result
+    findings = evidence.findings
+    direct = [f"{address} (not via the proxy)" for address in findings.direct_connections]
+    return SandboxReport(
+        image=evidence.image,
+        exit_code=None if result.timed_out else result.exit_code,
+        timed_out=result.timed_out,
+        duration_ms=observation.duration_ms,
+        stdout_tail=_tail(observation.stdout, evidence.tripwire_seed),
+        stderr_tail=_tail(observation.stderr, evidence.tripwire_seed),
+        files_created=observation.files_created,
+        files_modified=observation.files_modified,
+        files_deleted=observation.files_deleted,
+        network_attempts=_hosts(evidence.records) + direct,
+        tripwires_triggered=_tripwire_hits(findings, evidence.records, evidence.run_label),
+        notes=evidence.warnings + _run_warnings(evidence),
+    )
+
+
+def _run_warnings(evidence: _RunEvidence) -> list[str]:
+    """Things the file and host lists cannot show, so the reader does not assume a clean run."""
+    result = evidence.observation.result
+    findings = evidence.findings
+    warnings = []
+    if result.left_processes:
+        warnings.append("Background processes were still running when the command finished.")
+    if result.ended_abnormally:
+        warnings.append("The command ended without recording an exit status (it was killed).")
+    if result.disk_limit_hit:
+        warnings.append(
+            f"The command was stopped after writing more than {DISK_LIMIT_BYTES // 1024**2} MiB."
+        )
+    if findings.outside_writes:
+        warnings.append(
+            "Changed files outside the repo, which the file lists do not show: "
+            + ", ".join(findings.outside_writes)
+        )
+    if findings.failed_changes:
+        warnings.append(
+            "Tried to change paths that do not exist in the sandbox (the host may have them): "
+            + ", ".join(findings.failed_changes)
+        )
+    if findings.direct_connections:
+        warnings.append("Connected to addresses without going through the logging proxy.")
+    # Through the proxy, DNS is only used to find the proxy itself, so that alone proves nothing.
+    if findings.used_dns and not findings.used_proxy:
+        warnings.append("Looked up a hostname without going through the proxy, so the name was not logged.")
+    return warnings
+
+
+def _list_repo_files(repo_root: Path) -> list[str]:
+    """Tracked and untracked files that are not gitignored, relative to the repo root."""
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+            cwd=repo_root, capture_output=True, check=False,
+        )
+    except FileNotFoundError as exc:
+        raise SandboxEnvironmentError("The git command was not found.") from exc
+    if result.returncode != EXIT_SUCCESS:
+        raise SandboxEnvironmentError(f"{repo_root} is not a git repository, so it cannot be copied.")
+    # fsdecode, not decode: a file name need not be valid UTF-8.
+    names = [os.fsdecode(name) for name in result.stdout.split(b"\0")]
+    return [name for name in names if name and (repo_root / name).is_file()]
+
+
+def _host_path_warnings(
+    command: str, cwd: Path, repo_root: Path, repo_file_paths: list[str]
+) -> list[str]:
+    """Warn about paths in the command that the sandbox does not have, so "no change" is not trusted.
+
+    The sandbox holds only the repo's non-ignored files, so a command aimed at an ignored folder
+    or at a path outside the repo looks harmless there.
+    """
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return []
+    root = repo_root.resolve()
+    warnings = []
+    for token in tokens:
+        if token.startswith("-"):
+            continue
+        path = Path(os.path.expanduser(token))
+        path = path if path.is_absolute() else cwd / path
+        if not path.exists():
+            continue
+        resolved = path.resolve()
+        try:
+            relative = resolved.relative_to(root).as_posix()
+        except ValueError:
+            if not str(resolved).startswith(SYSTEM_PROGRAM_DIRECTORIES):
+                warnings.append(
+                    f"{token} is a host path outside the repo; the sandbox has no copy of it, "
+                    "so what the command does to it is not shown."
+                )
+            continue
+        in_sandbox = relative == "." or any(
+            file == relative or file.startswith(f"{relative}/") for file in repo_file_paths
+        )
+        if not in_sandbox:
+            warnings.append(
+                f"{token} exists on the host but is not copied into the sandbox (gitignored), "
+                "so what the command does to it is not shown."
+            )
+    return list(dict.fromkeys(warnings))
+
+
+def _owned_by_sandbox(info: tarfile.TarInfo) -> tarfile.TarInfo:
+    info.uid = SANDBOX_UID
+    info.gid = SANDBOX_GID
+    return info
+
+
+def _build_repo_copy_archive(repo_root: Path, repo_file_paths: list[str]) -> IO[bytes]:
+    """Tar of the repo under workspace/.
+
+    Parent directories get explicit entries owned by the sandbox user; otherwise Docker would
+    create them as root and the command could not delete or write inside them. The tar goes to a
+    temp file (closed by `_release`) so a large repo is never held in memory.
+    """
+    directories = set()
+    for name in repo_file_paths:
+        for parent in Path(name).parents:
+            if parent != Path("."):
+                directories.add(parent.as_posix())
+    buffer = tempfile.TemporaryFile()  # noqa: SIM115 - the run's cleanup closes it
+    with tarfile.open(fileobj=buffer, mode="w") as archive:
+        for directory in sorted(directories):
+            info = tarfile.TarInfo(f"workspace/{directory}")
+            info.type = tarfile.DIRTYPE
+            info.mode = 0o755
+            archive.addfile(_owned_by_sandbox(info))
+        for name in repo_file_paths:
+            try:
+                archive.add(repo_root / name, arcname=f"workspace/{name}", filter=_owned_by_sandbox)
+            except OSError as exc:
+                raise SandboxEnvironmentError(
+                    f"Could not read {name} to copy it into the sandbox: {exc}"
+                ) from exc
+    buffer.seek(0)
+    return buffer
+
+
+def _create_container(client: DockerClient, image: str) -> Container:
+    """Create (not start) a locked-down container on the internet-less network."""
+    return client.containers.create(
+        image,
+        network=NETWORK_NAME,  # without this the container would get internet access
+        environment=proxy_environment(),
+        cap_drop=["ALL"],
+        security_opt=["no-new-privileges"],
+        nano_cpus=CPU_LIMIT_NANO_CPUS,
+        mem_limit=MEMORY_LIMIT,
+        memswap_limit=MEMORY_LIMIT,
+        pids_limit=PIDS_LIMIT,
+        labels=sandbox_container_labels(),  # lets ensure_environment reap it after a crash
+    )
+
+
+def _exec_traced(
+    client: DockerClient, container: Container, command: str, workdir: str
+) -> _CommandResult:
+    """Run the command under strace, with its output going to files inside the container.
+
+    The wrapper can outlive the command (strace waits for background processes), so completion
+    is judged by the exit status file, and the wait has a hard deadline.
+    """
+    api = client.api
+    exec_id = api.exec_create(
+        container.id,
+        ["sh", "-c", WRAPPER_SCRIPT],
+        workdir=workdir,
+        environment={COMMAND_VARIABLE: command},
+    )["Id"]
+    api.exec_start(exec_id, detach=True)
+
+    started = time.monotonic()
+    wrapper_exit_code: int | None = None
+    left_processes = False
+    hit_deadline = False
+    next_disk_check = DISK_CHECK_SECONDS
+    while True:
+        elapsed = time.monotonic() - started
+        info = api.exec_inspect(exec_id)
+        if not info["Running"]:
+            wrapper_exit_code = info["ExitCode"]
+            break
+        if elapsed >= HARD_DEADLINE_SECONDS:
+            hit_deadline = True
+            break
+        if elapsed >= next_disk_check:
+            next_disk_check = elapsed + DISK_CHECK_SECONDS
+            if _writable_layer_bytes(client, container) > DISK_LIMIT_BYTES:
+                container.exec_run(KILL_ALL_COMMAND)
+                return _CommandResult(None, False, False, False, disk_limit_hit=True)
+        if elapsed >= ORPHAN_CHECK_AFTER_SECONDS and _read_exit_code(container) is not None:
+            left_processes = True
+            break
+        time.sleep(POLL_SECONDS if elapsed < ORPHAN_CHECK_AFTER_SECONDS else ORPHAN_POLL_SECONDS)
+
+    command_exit_code = _read_exit_code(container)
+    if command_exit_code is not None:
+        return _CommandResult(command_exit_code, False, False, left_processes)
+    killed = wrapper_exit_code in KILLED_EXIT_CODES and elapsed >= RUN_TIMEOUT_SECONDS
+    timed_out = hit_deadline or killed
+    return _CommandResult(
+        exit_code=None if timed_out else wrapper_exit_code,
+        timed_out=timed_out,
+        ended_abnormally=not timed_out,
+        left_processes=False,
+    )
+
+
+def _writable_layer_bytes(client: DockerClient, container: Container) -> int:
+    """How much the container has written so far, as Docker measures its writable layer."""
+    rows = client.api.containers(all=True, size=True, filters={"id": container.id})
+    return int(rows[0].get("SizeRw") or 0) if rows else 0
+
+
+def _read_exit_code(container: Container) -> int | None:
+    """The command's own exit status, written when it finished. None while it is still running."""
+    result = container.exec_run(["cat", EXIT_CODE_PATH])
+    if result.exit_code != EXIT_SUCCESS:
+        return None
+    try:
+        return int(result.output.strip())
+    except ValueError:
+        return None
+
+
+def _read_tail(container: Container, path: str, byte_count: int | None) -> bytes:
+    """Last `byte_count` bytes of a file in the container (all of it for None); empty if missing."""
+    command = ["cat", path] if byte_count is None else ["tail", "-c", str(byte_count), path]
+    result = container.exec_run(command)
+    return result.output if result.exit_code == EXIT_SUCCESS else b""
+
+
+def _run_checked(container: Container, command: list[str]) -> bytes:
+    """Run a helper command inside the container; a failure is a sandbox failure."""
+    result = container.exec_run(command)
+    if result.exit_code != EXIT_SUCCESS:
+        raise SandboxEnvironmentError(f"`{' '.join(command)}` failed inside the sandbox.")
+    return result.output
+
+
+def _workspace_diff(container: Container) -> dict[str, int]:
+    """Path -> change kind from container.diff(), files and folders under /workspace."""
+    changes = container.diff() or []
+    workspace_changes = {}
+    for change in changes:
+        if change["Path"].startswith(f"{WORKSPACE}/"):
+            workspace_changes[change["Path"]] = change["Kind"]
+    return workspace_changes
+
+
+def _paths_of_kind(changes: dict[str, int], kind: int) -> set[str]:
+    return {path for path, path_kind in changes.items() if path_kind == kind}
+
+
+def _modified_files(container: Container, created_paths: set[str]) -> list[str]:
+    """Files written to since the run marker that the command did not create.
+
+    The diff cannot see these for copied files (they are all 'added'), so mtimes are used.
+    """
+    output = _run_checked(
+        container, ["find", WORKSPACE, "-type", "f", "-newer", RUN_MARKER_PATH]
+    ).decode(errors="replace")
+    return sorted(set(output.splitlines()) - created_paths)
+
+
+def _remove_container(container: Container) -> None:
+    try:
+        container.remove(force=True)
+    except NotFound:
+        pass  # already gone
+
+
+def _hosts(records: list[dict]) -> list[str]:
+    """Hosts the command tried to reach, in first-seen order."""
+    hosts = (record.get("host") for record in records)
+    return list(dict.fromkeys(host for host in hosts if host))
+
+
+def _tripwire_hits(findings: StraceFindings, records: list[dict], run_label: str) -> list[str]:
+    """Names only, never the secret values."""
+    hits = [f"read {path}" for path in findings.opened_paths if path in TRIPWIRE_PATHS]
+    for record in records:
+        for hit in record.get("tripwire_hits", []):
+            if hit.get("session_id") == run_label:
+                hits.append(f"sent {hit['name']} in {hit['location']} to {record.get('host')}")
+    return list(dict.fromkeys(hits))
+
+
+def _redact(text: str, tripwire_seed: str) -> str:
+    """Replace this session's fake secret values: they must never end up in reports or logs."""
+    for name, value in generate_tripwire_values(tripwire_seed).items():
+        text = text.replace(value, f"[tripwire {name}]")
+    return text
+
+
+def _tail(data: bytes, tripwire_seed: str) -> str:
+    redacted = _redact(data.decode(errors="replace"), tripwire_seed)
+    return redacted[-OUTPUT_TAIL_BYTES:]

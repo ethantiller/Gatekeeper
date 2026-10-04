@@ -53,7 +53,6 @@ gatekeeper/
 │       └── dev.py                  # gatekeeper sandbox-test, fun on|off (GK-4, GK-10)
 ├── docker/
 │   ├── base.Dockerfile             # base sandbox image (GK-2)
-│   ├── compose.yaml                # logger container, gk-sandbox network, image builds (GK-2)
 │   ├── tripwire_templates/         # fake secret file layouts (GK-2)
 │   │   ├── env.template
 │   │   └── aws_credentials.template
@@ -81,10 +80,10 @@ gatekeeper/
 ## Sandbox environment (GK-2)
 
 - **Base image**: `docker/base.Dockerfile`, Node 22 on Debian bookworm-slim with git, python3, uv, corepack, strace and a non-root `sandbox` user (uid 1000). Tripwire files are not baked in; they are planted per session at run time.
-- **Network** `gk-sandbox`: a Docker bridge network with `internal=True`, so containers on it have no route to the internet. Defined in `docker/compose.yaml`, which also defines the logger.
+- **Network** `gk-sandbox`: a Docker bridge network with `internal=True`, so containers on it have no route to the internet. Created by `sandbox/environment.py` through the Docker Python SDK, which also starts the logger.
 - **Connection logger** `gk-connection-logger`: a mitmproxy container on that network. Sandbox containers send web traffic to it through `http_proxy`/`https_proxy` (see `proxy_environment()`). It logs every host, scans URLs, headers and bodies for tripwire values (raw, URL, hex, base64), answers 403 and never forwards anything.
 
-Build and start everything with `docker compose` (idempotent; `status` and `down` work the same way; add `--rebuild` after `up` to rebuild the images):
+Build and start everything (idempotent; `status` and `down` work the same way; add `--rebuild` after `up` to rebuild the images):
 
 ```
 uv run python -m gatekeeper.sandbox.environment up
@@ -102,6 +101,8 @@ Tests: `uv run pytest`. `tests/test_sandbox_network.py` needs a running Docker d
 
 **HTTPS interception works.** Sandbox containers trust the logger's CA (copied in with `ca_certificate_archive()`), so decrypted HTTPS requests are logged and scanned like HTTP. The CA is regenerated if the logger container is recreated, so copy it into each new sandbox container.
 
+**Running a command** (GK-4): `sandbox.runner.run(action, session)` copies the repo (minus gitignored files), the fake secrets and the logger CA into a throwaway container on `gk-sandbox`, runs `action.command` under `strace` with a 30 s timeout, and returns a `SandboxReport`. Try it with `uv run python -m gatekeeper.cli.dev "<command>"` (to be `gatekeeper sandbox-test`).
+
 **strace** works as user `sandbox` with `cap_drop=["ALL"]` and no extra capabilities (tested on Docker 29.4.1).
 
 ## Shared types
@@ -115,6 +116,7 @@ All shared Pydantic types live in `src/gatekeeper/server/types.py`. Every pipeli
 | `RuleResult` | Which rules matched, their tags, and an optional forced verdict. |
 | `UntrustedRead` | Content the agent read but did not write (a URL, a cloned file). Used to catch prompt injection. |
 | `JudgeResult` | The LLM's risk rating and reasoning. |
+| `SandboxSession` | What `sandbox.run(action, session)` needs from a session: `session_id` (the agent's own id or a generated one, not guaranteed to be a UUID), `repo_root` (the repo's top folder, not `action.cwd`, which can be a subfolder) and `tripwire_seed` (a random secret the fake secret values come from; never the session id, which the agent can read). GK-5 builds one from the full session record (GK-6). |
 | `SandboxReport` | What a command did in the container: files changed, hosts contacted, tripwires triggered. |
 | `Decision` | The final verdict for one action, embedding every stage's output above. |
 
