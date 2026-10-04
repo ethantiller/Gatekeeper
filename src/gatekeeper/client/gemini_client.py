@@ -13,7 +13,7 @@ from gatekeeper.server.types import JudgeResult, RiskLevel
 
 load_dotenv()
 
-DEFAULT_MODEL = "gemini-2.5-flash"
+DEFAULT_MODEL = "gemini-3.5-flash-lite"
 TIMEOUT_MS = 10_000
 LOCAL_TIMEOUT_SECONDS = 8
 RETRIES = 1
