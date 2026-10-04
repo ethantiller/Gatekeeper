@@ -27,6 +27,7 @@ from gatekeeper.server.types import (
 
 DEFAULT_RULES_PATH = Path(__file__).resolve().parents[3] / "rules" / "rules.yaml"
 REPOSITORY_RULES_NAME = ".gatekeeper.yaml"
+USER_RULES_NAME = "rules.yaml"
 # A cloned repo is untrusted, so its rules file may only add checks. Lists are appended, so
 # these keys can only make Gatekeeper stricter; safe_commands, allowed_hosts, auto_allow_tags,
 # judge_failure_verdict and the limits come from the user's own rules only.
@@ -39,24 +40,71 @@ REPOSITORY_OVERRIDE_KEYS = {
 }
 
 
+class UserRulesError(ValueError):
+    """Raised when the user's own rules file is unreadable or has the wrong shape."""
+
+
+def user_rules_path() -> Path:
+    """`~/.gatekeeper/rules.yaml`, the trusted user config."""
+    return Path.home() / ".gatekeeper" / USER_RULES_NAME
+
+
 def load_default_rules() -> dict[str, Any]:
-    """The built-in rules, without any repository file."""
+    """The built-in rules, without any user or repository file."""
     return _read_rule_config(DEFAULT_RULES_PATH)
 
 
-def load_rules(repo_path: str | Path | None = None) -> dict[str, Any]:
-    """Load default rules and overlay a repository's optional rule file."""
+def load_user_rules() -> dict[str, Any]:
+    """The built-in rules with the user's `~/.gatekeeper/rules.yaml` laid over them.
+
+    The user file is trusted: any key it sets replaces the default value (so it can shorten
+    `safe_commands` or fill `auto_allow_tags`). Keys it leaves out keep their defaults.
+    Raises `UserRulesError` naming the file and the problem.
+    """
     defaults = load_default_rules()
+    path = user_rules_path()
+    if not path.exists():
+        return defaults
+    try:
+        user = _read_rule_config(path)
+        _check_user_shape(defaults, user, path)
+    except (RuntimeError, TypeError, ValueError) as error:
+        cause = error.__cause__
+        detail = f"{error}: {cause}" if cause else str(error)
+        raise UserRulesError(f"{path}: {detail}") from error
+    return {**defaults, **user}
+
+
+def load_rules(repo_path: str | Path | None = None) -> dict[str, Any]:
+    """Load default rules, the user's rules, then a repository's optional rule file."""
+    base = load_user_rules()
     repository = Path.cwd() if repo_path is None else Path(repo_path)
     override_path = repository / REPOSITORY_RULES_NAME
 
     if not override_path.exists():
-        return defaults
+        return base
 
     overrides = _read_rule_config(override_path)
     allowed = {key: value for key, value in overrides.items() if key in REPOSITORY_OVERRIDE_KEYS}
-    _check_override_shape(defaults, allowed, override_path.name)
-    return _merge_rule_values(defaults, allowed)
+    _check_override_shape(base, allowed, override_path.name)
+    return _merge_rule_values(base, allowed)
+
+
+def _check_user_shape(defaults: dict[str, Any], user: dict[str, Any], path: Path) -> None:
+    """Reject a user setting whose type differs from the default, and invalid regexes."""
+    for key, value in user.items():
+        reference = defaults.get(key)
+        if reference is not None and type(value) is not type(reference):
+            raise TypeError(
+                f"'{key}' must be a {type(reference).__name__}, not {type(value).__name__}"
+            )
+    for rule in user.get("never_allowed", []):
+        pattern = rule.get("pattern") if isinstance(rule, dict) else None
+        if isinstance(pattern, str):
+            try:
+                re.compile(pattern)
+            except re.error as error:
+                raise ValueError(f"'never_allowed' has an invalid pattern: {error}") from error
 
 
 def _check_override_shape(defaults: Any, overrides: Any, where: str) -> None:
