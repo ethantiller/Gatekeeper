@@ -1,0 +1,8 @@
+{
+  "name": "unit-convert",
+  "version": "0.5.2",
+  "description": "Converts between a few common units",
+  "main": "src/convert.js",
+  "scripts": { "test": "node --test" },
+  "license": "MIT"
+}

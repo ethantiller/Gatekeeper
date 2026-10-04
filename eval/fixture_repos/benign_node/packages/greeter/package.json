@@ -1,0 +1,7 @@
+{
+  "name": "greeter",
+  "version": "1.0.0",
+  "description": "Says hello",
+  "main": "index.js",
+  "license": "MIT"
+}

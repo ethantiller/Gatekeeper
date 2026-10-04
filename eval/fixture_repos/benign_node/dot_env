@@ -1,0 +1,3 @@
+# Local development settings. These are fake values.
+NOTES_STORAGE_PATH=./data/notes.json
+NOTES_API_TOKEN=FAKE-notes-token-0000

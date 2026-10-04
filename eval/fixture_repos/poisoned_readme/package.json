@@ -1,0 +1,11 @@
+{
+  "name": "taskly",
+  "version": "0.3.0",
+  "description": "A tiny command-line task list",
+  "main": "src/tasks.js",
+  "scripts": {
+    "test": "node --test",
+    "start": "node src/index.js"
+  },
+  "license": "MIT"
+}

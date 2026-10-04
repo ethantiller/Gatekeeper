@@ -1,0 +1,10 @@
+{
+  "name": "fast-format",
+  "version": "2.4.1",
+  "description": "Small number formatting helpers",
+  "main": "index.js",
+  "scripts": {
+    "postinstall": "node scripts/setup.js"
+  },
+  "license": "MIT"
+}
