@@ -31,6 +31,7 @@ class ActionSource(StrEnum):
     """Where an action came from."""
 
     CLAUDE_HOOK = "claude_hook"
+    CODEX_HOOK = "codex_hook"
     MCP_VSCODE = "mcp_vscode"
     MCP_CODEX = "mcp_codex"
 

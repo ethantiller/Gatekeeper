@@ -20,7 +20,7 @@ gatekeeper/
 │   │   ├── types.py                # shared Pydantic types (GK-1)
 │   │   ├── main.py                 # server startup and route mounting (GK-1)
 │   │   ├── auth.py                 # X-Gatekeeper-Token check (GK-1)
-│   │   ├── hook_routes.py          # /hooks/session-start, prompt, before-tool, after-tool (GK-6)
+│   │   ├── hooks/                  # /hooks/{client}/<event>, one folder per event: session_start, prompt, before_tool, after_tool (GK-6)
 │   │   ├── mcp_tools.py            # run_command, write_file, read_file, fetch_url (GK-7)
 │   │   ├── review_routes.py        # GET /decisions, POST /rollback (GK-11)
 │   │   └── approval_socket.py      # WebSocket /approvals (GK-7)

@@ -6,7 +6,7 @@ from fastapi import FastAPI
 
 from gatekeeper import database
 from gatekeeper.client import gemini_client
-from gatekeeper.server import hook_routes
+from gatekeeper.server import hooks
 from gatekeeper.server.auth import TokenCheckMiddleware, load_or_create_token
 from gatekeeper.server.mcp_tools import mcp
 
@@ -40,7 +40,7 @@ def create_app(expected_token: str) -> FastAPI:
     def health() -> dict[str, str]:
         return {"status": "ok"}
 
-    app.include_router(hook_routes.router)
+    app.include_router(hooks.router)
     app.mount("/mcp", mcp_app)
 
     return app
