@@ -1,0 +1,14 @@
+{
+  "name": "metrics-dash",
+  "version": "1.2.0",
+  "description": "Formats and prints a few service metrics",
+  "main": "src/report.js",
+  "scripts": {
+    "test": "node --test",
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "fast-format": "file:./packages/fast-format"
+  },
+  "license": "MIT"
+}

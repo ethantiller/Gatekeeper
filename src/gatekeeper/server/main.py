@@ -1,3 +1,4 @@
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -11,7 +12,7 @@ from gatekeeper.server.auth import TokenCheckMiddleware, load_or_create_token
 from gatekeeper.server.mcp_tools import mcp
 
 HOST = "127.0.0.1"
-PORT = 8787
+PORT = int(os.environ.get("GATEKEEPER_PORT", "8787"))  # the eval runner uses its own port
 
 
 def create_app(expected_token: str) -> FastAPI:

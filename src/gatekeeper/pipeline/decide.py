@@ -18,6 +18,7 @@ from gatekeeper.pipeline.rules import (
     load_rules,
 )
 from gatekeeper.pipeline.scanner import SUSPICIOUS_SCORE
+from gatekeeper.pipeline.scripts import find_scripts
 from gatekeeper.sandbox import runner
 from gatekeeper.server.types import (
     ActionKind,
@@ -91,6 +92,7 @@ async def decide(
     if rules.forced_verdict is None and not suspicious_reads_blocking(rules.tags, reads):
         snippets = [read.snippet for read in reads]
         prompt = _latest_prompt(conn, session.session_id)
+        scripts = find_scripts(parsed, action.cwd, session.repo_root) if action.command else []
         sandbox_session = SandboxSession(
             session_id=session.session_id,
             repo_root=session.repo_root,
@@ -102,10 +104,12 @@ async def decide(
             # A fake secret was touched: combine denies whatever the judge would say.
             if _needs_judge(action, rules, config, tainted) and not sandbox_report.tripwires_triggered:
                 judge_result = await judge.rate(
-                    action, rules, snippets, prompt, sandbox_report, client=gemini
+                    action, rules, snippets, prompt, sandbox_report, client=gemini, scripts=scripts
                 )
         elif _needs_judge(action, rules, config, tainted):
-            judge_result = await judge.rate(action, rules, snippets, prompt, client=gemini)
+            judge_result = await judge.rate(
+                action, rules, snippets, prompt, client=gemini, scripts=scripts
+            )
             if _should_escalate(action, judge_result):
                 sandbox_report = await asyncio.to_thread(runner.run, action, sandbox_session)
 

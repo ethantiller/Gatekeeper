@@ -1,0 +1,8 @@
+{
+  "name": "pixelpack",
+  "version": "0.8.0",
+  "description": "Packs small images into a sprite sheet description",
+  "main": "src/pack.js",
+  "scripts": { "test": "node --test" },
+  "license": "MIT"
+}

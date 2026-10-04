@@ -1,0 +1,8 @@
+{
+  "name": "greetbot",
+  "version": "1.1.0",
+  "description": "Builds greeting messages for a chat bot",
+  "main": "src/greet.js",
+  "scripts": { "test": "node --test" },
+  "license": "MIT"
+}
