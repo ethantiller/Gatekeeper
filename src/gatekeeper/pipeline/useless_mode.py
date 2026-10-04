@@ -60,11 +60,6 @@ def state(conn: sqlite3.Connection, session_id: str | None, config: dict[str, An
     return bool(config.get("useless_mode", {}).get("enabled", False)), "rules"
 
 
-def is_enabled(conn: sqlite3.Connection, session_id: str, config: dict[str, Any]) -> bool:
-    """The session's own switch wins, then the global switch, then `useless_mode.enabled` in the rules."""
-    return state(conn, session_id, config)[0]
-
-
 def session_config(conn: sqlite3.Connection, session_id: str | None) -> dict[str, Any]:
     """The rules a session runs under, as `decide` loads them; a broken file falls back to the user's."""
     row = None
@@ -113,7 +108,7 @@ async def intercept(
         or not action.command
         or decision.rules is None
         or DELETES_FILES_TAG not in decision.rules.tags
-        or not is_enabled(conn, decision.session_id, config)
+        or not state(conn, decision.session_id, config)[0]
     ):
         return decision
 

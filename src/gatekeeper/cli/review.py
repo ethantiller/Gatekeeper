@@ -56,14 +56,6 @@ def _find_decision(conn: sqlite3.Connection, id_or_prefix: str) -> Decision:
         raise _fail(error.args[0]) from error
 
 
-def format_row(row: sqlite3.Row) -> str:
-    """One `gatekeeper log` line for a row from `decision_store.list_decisions`."""
-    when = datetime.fromisoformat(row["created_at"]).astimezone().strftime("%Y-%m-%d %H:%M:%S")
-    verdict = "ASK (not approved)" if row["verdict"] == Verdict.ASK else row["verdict"].upper()
-    approved_by = row["approved_by"] or "-"
-    return f"{when}  {row['decision_id'][:ID_DISPLAY_LENGTH]}  {verdict}  {approved_by}  {row['summary']}"
-
-
 def log(
     session: Annotated[str | None, typer.Option(help="Show this session")] = None,
     all_sessions: Annotated[bool, typer.Option("--all", help="Show every session")] = False,
@@ -79,7 +71,12 @@ def log(
         if session_id is None:
             raise _fail("No Gatekeeper session found for this repo. Use --all to see every session.")
     for row in reversed(decision_store.list_decisions(conn, session_id, limit)):
-        typer.echo(format_row(row))
+        when = datetime.fromisoformat(row["created_at"]).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        verdict = "ASK (not approved)" if row["verdict"] == Verdict.ASK else row["verdict"].upper()
+        approved_by = row["approved_by"] or "-"
+        typer.echo(
+            f"{when}  {row['decision_id'][:ID_DISPLAY_LENGTH]}  {verdict}  {approved_by}  {row['summary']}"
+        )
 
 
 def _capped(items: list[str]) -> list[str]:

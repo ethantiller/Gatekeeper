@@ -12,9 +12,7 @@ their creators. Sounds are cut to a few seconds and converted to WAV.
 - `sounds/metal_pipe.wav`: https://www.myinstants.com/media/sounds/metal-pipe-clang.mp3
 - `sounds/taco_bell.wav`: https://www.myinstants.com/media/sounds/taco-bell-bong-sfx.mp3
 - `sounds/fart_reverb.wav`: https://www.myinstants.com/media/sounds/fart-with-reverb.mp3
-- `sounds/emotional_damage.wav`: https://www.myinstants.com/media/sounds/emotional-damage-meme.mp3
 - `sounds/spongebob_fail.wav`: https://www.myinstants.com/media/sounds/spongebob-fail.mp3
-- `sounds/gyatt.wav`: https://www.myinstants.com/media/sounds/gyatt.mp3
 - `sounds/sigma.wav`: https://www.myinstants.com/media/sounds/sigma.mp3
 - `sounds/rizz.wav`: https://www.myinstants.com/media/sounds/rizz.mp3
 - `sounds/ohio.wav`: https://www.myinstants.com/media/sounds/ohio.mp3
@@ -30,4 +28,4 @@ their creators. Sounds are cut to a few seconds and converted to WAV.
 - `sounds/jumpscare.wav`: https://www.myinstants.com/media/sounds/jumpscare.mp3
 - `sounds/windows_error.wav`: https://www.myinstants.com/media/sounds/windows-xp-error-sound.mp3
 - `sounds/sheesh.wav`: https://www.myinstants.com/media/sounds/sheeesh.mp3
-- `sounds/session_start.wav`: played when a new Claude Code session starts; converted from myinstants.mp3, which the project owner added
+- `sounds/session_start.wav`: played when a new Claude Code session starts; added by hand

@@ -17,7 +17,8 @@ gatekeeper/
 │   ├── migrations/
 │   │   ├── 0001_initial.sql        # the five tables: sessions, prompts, untrusted_reads, decisions, checkpoints (GK-1)
 │   │   ├── 0004_untrusted_snippets.sql  # sequence, score and snippet on untrusted_reads (GK-8)
-│   │   └── 0005_useless_questions.sql   # questions useless mode asked and the answers (GK-10)
+│   │   ├── 0005_useless_questions.sql   # questions useless mode asked and the answers (GK-10)
+│   │   └── 0006_drop_pending_question.sql  # drops the columns 0005 replaced (GK-10)
 │   ├── server/
 │   │   ├── types.py                # shared Pydantic types (GK-1)
 │   │   ├── main.py                 # server startup and route mounting (GK-1)

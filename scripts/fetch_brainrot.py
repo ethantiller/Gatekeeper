@@ -19,8 +19,7 @@ HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chr
 
 # Sounds added by hand, not downloaded by this script: name -> where they came from.
 CUSTOM_SOUNDS = {
-    "session_start": "played when a new Claude Code session starts; converted from myinstants.mp3,"
-    " which the project owner added",
+    "session_start": "played when a new Claude Code session starts; added by hand",
 }
 
 # name -> myinstants file name (without .mp3)
@@ -33,9 +32,7 @@ SOUNDS = {
     "metal_pipe": "metal-pipe-clang",
     "taco_bell": "taco-bell-bong-sfx",
     "fart_reverb": "fart-with-reverb",
-    "emotional_damage": "emotional-damage-meme",
     "spongebob_fail": "spongebob-fail",
-    "gyatt": "gyatt",
     "sigma": "sigma",
     "rizz": "rizz",
     "ohio": "ohio",
@@ -52,6 +49,7 @@ SOUNDS = {
     "windows_error": "windows-xp-error-sound",
     "sheesh": "sheeesh",
 }
+
 
 def main() -> None:
     if shutil.which("ffmpeg") is None:

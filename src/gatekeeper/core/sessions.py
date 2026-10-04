@@ -135,9 +135,14 @@ def global_useless_mode(connection: sqlite3.Connection) -> bool | None:
 
 
 def set_global_useless_mode(connection: sqlite3.Connection, enabled: bool) -> None:
+    """Set the switch for every session and clear their own switches, so this one decides."""
     with connection:
         connection.execute(
             "INSERT INTO settings (key, value) VALUES ('useless_mode', ?)"
             " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             ("on" if enabled else "off",),
+        )
+        connection.execute(
+            "UPDATE sessions SET metadata_json = json_remove(metadata_json, '$.useless_mode')"
+            " WHERE json_extract(metadata_json, '$.useless_mode') IS NOT NULL"
         )
