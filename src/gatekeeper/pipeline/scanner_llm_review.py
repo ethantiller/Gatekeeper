@@ -1,13 +1,16 @@
+import asyncio
 import json
 
 from google import genai
 from google.genai import types
 
 from gatekeeper.client.gemini_client import generate_structured_response
+from gatekeeper.pipeline.scanner import SUSPICIOUS_SCORE
 from gatekeeper.server.types import ScannerLLMReviewResult
 
 MIN_LLM_REVIEW_SCORE = 0.3
-MAX_LLM_REVIEW_SCORE = 0.8
+# The review runs inside the after-tool hook, so it gets one short attempt.
+REVIEW_TIMEOUT_SECONDS = 5
 
 
 async def review_ambiguous_scan(
@@ -18,19 +21,29 @@ async def review_ambiguous_scan(
 	model: str | None = None,
 	client: genai.Client | None = None,
 ) -> ScannerLLMReviewResult | None:
+	"""Ask the LLM about a score of 0.3 up to (not including) 0.8; None for any other score.
 
-	# Review ambiguous scan results only if the score is within the defined range
-	if not MIN_LLM_REVIEW_SCORE <= score <= MAX_LLM_REVIEW_SCORE:
+	A missing API key, a timeout or a bad reply comes back as `suspicious=True`, so a failed
+	review fails safe.
+	"""
+	if not MIN_LLM_REVIEW_SCORE <= score < SUSPICIOUS_SCORE:
 		return None
 
 	contents = _build_review_contents(text, score, findings)
-	return await generate_structured_response(
-		client,
-		contents,
-		_review_response_schema(),
-		ScannerLLMReviewResult.model_validate_json,
-		model=model,
-	)
+	try:
+		async with asyncio.timeout(REVIEW_TIMEOUT_SECONDS):
+			return await generate_structured_response(
+				client,
+				contents,
+				_review_response_schema(),
+				ScannerLLMReviewResult.model_validate_json,
+				model=model,
+			)
+	except (RuntimeError, ValueError, TimeoutError) as error:
+		return ScannerLLMReviewResult(
+			suspicious=True,
+			reasoning=f"The review could not run, so this is treated as suspicious: {error}",
+		)
 
 
 def _build_review_contents(text: str, score: float, findings: list[str]) -> str:

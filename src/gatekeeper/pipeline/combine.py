@@ -3,6 +3,8 @@
 from typing import Any
 
 from gatekeeper.pipeline.rules import path_matches_pattern
+from gatekeeper.pipeline.scanner import SUSPICIOUS_SCORE
+from gatekeeper.pipeline.untrusted import display_source
 from gatekeeper.server.types import (
     Decision,
     JudgeResult,
@@ -11,11 +13,15 @@ from gatekeeper.server.types import (
     RuleResult,
     SandboxReport,
     StandardAction,
+    UntrustedRead,
     Verdict,
 )
 
 DEFAULT_MAX_DELETED_FILES = 20
 DEFAULT_JUDGE_FAILURE_VERDICT = Verdict.ASK
+# After a suspicious read, an action with all of these tags (secrets on their way out) is denied.
+# Either tag alone, or any other tag, asks: the user can approve a real `git pull` or `.env` read.
+EXFILTRATION_TAGS = {"network", "touches_secrets"}
 
 
 def combine(
@@ -25,7 +31,7 @@ def combine(
     rules: RuleResult | None = None,
     judge: JudgeResult | None = None,
     sandbox: SandboxReport | None = None,
-    tainted_by: list[str] | None = None,
+    untrusted_reads: list[UntrustedRead] | None = None,
     config: dict[str, Any] | None = None,
     remembered: bool = False,
 ) -> Decision:
@@ -34,9 +40,10 @@ def combine(
     `remembered` is True when the user already approved this action id with "remember":
     it turns an ASK into an ALLOW but never overrides a DENY.
     """
-    tainted_by = tainted_by or []
+    suspicious_reads = [r for r in untrusted_reads or [] if r.score >= SUSPICIOUS_SCORE]
+    tainted_by = [read.read_id for read in suspicious_reads]
     config = config or {}
-    verdict, reasons = _choose_verdict(action, rules, judge, sandbox, tainted_by, config)
+    verdict, reasons = _choose_verdict(action, rules, judge, sandbox, suspicious_reads, config)
 
     approved_by = "auto" if verdict == Verdict.ALLOW else None
     if verdict == Verdict.ASK and remembered:
@@ -63,7 +70,7 @@ def _choose_verdict(
     rules: RuleResult | None,
     judge: JudgeResult | None,
     sandbox: SandboxReport | None,
-    tainted_by: list[str],
+    suspicious_reads: list[UntrustedRead],
     config: dict[str, Any],
 ) -> tuple[Verdict, list[str]]:
     if rules is not None and rules.forced_verdict == Verdict.DENY:
@@ -73,13 +80,17 @@ def _choose_verdict(
         names = ", ".join(sandbox.tripwires_triggered)
         return Verdict.DENY, [f"The sandbox run touched fake secrets: {names}"]
 
+    blocking_reads = suspicious_reads_blocking(rules.tags if rules else [], suspicious_reads)
+    if blocking_reads:
+        return Verdict.DENY, [_follows_suspicious_read_reason(blocking_reads)]
+
     if rules is not None and rules.forced_verdict == Verdict.ALLOW:
         return Verdict.ALLOW, rules.reasons or ["A rule always allows this"]
 
     if judge is not None and judge.error is None and judge.risk == RiskLevel.CRITICAL:
         return Verdict.DENY, [f"The judge rated this critical: {judge.reasoning}"]
 
-    reasons = _reasons_to_ask(action, rules, judge, sandbox, tainted_by, config)
+    reasons = _reasons_to_ask(action, rules, judge, sandbox, suspicious_reads, config)
     if reasons:
         return _ask_or_judge_failure(judge, config), reasons
 
@@ -100,7 +111,7 @@ def _reasons_to_ask(
     rules: RuleResult | None,
     judge: JudgeResult | None,
     sandbox: SandboxReport | None,
-    tainted_by: list[str],
+    suspicious_reads: list[UntrustedRead],
     config: dict[str, Any],
 ) -> list[str]:
     reasons: list[str] = []
@@ -116,11 +127,14 @@ def _reasons_to_ask(
         reasons.append(f"The judge was unavailable ({judge.error})")
     elif judge.risk == RiskLevel.HIGH:
         reasons.append(f"The judge rated this high risk: {judge.reasoning}")
-    elif judge.risk == RiskLevel.MEDIUM and tainted_by:
+    elif judge.risk == RiskLevel.MEDIUM and suspicious_reads:
         reasons.append(f"The judge rated this medium risk: {judge.reasoning}")
 
-    if tainted_by and serious:
-        reasons.append("The agent read untrusted content earlier, and this action is tagged serious")
+    if suspicious_reads and tags:
+        reasons.append(
+            f"The agent read suspicious content earlier ({_read_sources(suspicious_reads)}),"
+            f" and this action is tagged risky ({', '.join(tags)})"
+        )
 
     if sandbox is not None:
         reasons.extend(_sandbox_concerns(action, sandbox, config))
@@ -164,3 +178,21 @@ def serious_tags(tags: list[str], config: dict[str, Any]) -> list[str]:
     """The tags that need the judge: configured serious tags the user has not auto-allowed."""
     wanted = set(config.get("serious_tags", [])) - set(config.get("auto_allow_tags", []))
     return sorted(set(tags) & wanted)
+
+
+def suspicious_reads_blocking(tags: list[str], reads: list[UntrustedRead]) -> list[UntrustedRead]:
+    """The suspicious reads that make this action a deny: secrets plus network after one (GK-8)."""
+    if not EXFILTRATION_TAGS <= set(tags):
+        return []
+    return [read for read in reads if read.score >= SUSPICIOUS_SCORE]
+
+
+def _follows_suspicious_read_reason(reads: list[UntrustedRead]) -> str:
+    return (
+        f"This looks like it follows instructions from {_read_sources(reads)},"
+        " which Gatekeeper flagged as suspicious."
+    )
+
+
+def _read_sources(reads: list[UntrustedRead]) -> str:
+    return ", ".join(dict.fromkeys(display_source(read.source) for read in reads))

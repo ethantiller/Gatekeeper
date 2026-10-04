@@ -145,7 +145,16 @@ class UntrustedRead(GatekeeperModel):
     read_id: str = Field(default_factory=new_id)
     session_id: str
     action_id: str = Field(description="The action that performed the read")
+    sequence: int = Field(ge=0, description="Per-session counter of the action that did the read")
     source: str = Field(description="Where the content came from: a file path or URL")
+    score: float = Field(
+        ge=0,
+        le=1,
+        description="Scanner score; at least 0.8 when the read was classified suspicious",
+    )
+    snippet: str = Field(
+        description="Up to 2,000 characters of the content, centred on the scanner findings"
+    )
     content_sha256: str = Field(
         description="Hash of the content, so we can match it later without storing it"
     )

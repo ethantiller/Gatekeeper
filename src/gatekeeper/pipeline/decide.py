@@ -9,10 +9,15 @@ from typing import Any, Protocol
 from google import genai
 
 from gatekeeper.core import decision_store
-from gatekeeper.pipeline import judge
-from gatekeeper.pipeline.combine import combine, serious_tags
+from gatekeeper.pipeline import judge, untrusted
+from gatekeeper.pipeline.combine import combine, serious_tags, suspicious_reads_blocking
 from gatekeeper.pipeline.parser import parse
-from gatekeeper.pipeline.rules import check_action_against_rules, load_default_rules, load_rules
+from gatekeeper.pipeline.rules import (
+    check_action_against_rules,
+    load_default_rules,
+    load_rules,
+)
+from gatekeeper.pipeline.scanner import SUSPICIOUS_SCORE
 from gatekeeper.sandbox import runner
 from gatekeeper.server.types import (
     ActionKind,
@@ -22,7 +27,6 @@ from gatekeeper.server.types import (
     RuleResult,
     SandboxSession,
     StandardAction,
-    UntrustedRead,
     Verdict,
 )
 
@@ -42,11 +46,6 @@ class SessionRecord(Protocol):
     session_id: str
     repo_root: Path
     tripwire_seed: str
-
-
-def recent_untrusted_reads(session_id: str, sequence: int) -> list[UntrustedRead]:
-    """Stand-in for `untrusted.recent` until GK-8 lands."""
-    return []
 
 
 async def decide(
@@ -77,13 +76,20 @@ async def decide(
         config = load_default_rules()
     parsed = parse(action)
     rules = check_action_against_rules(action, parsed, config, session.repo_root)
-    reads = recent_untrusted_reads(session.session_id, action.sequence)
+    reads = untrusted.recent(
+        conn,
+        session.session_id,
+        action.sequence,
+        config.get("untrusted_lookback_actions", untrusted.DEFAULT_LOOKBACK_ACTIONS),
+    )
 
+    tainted = any(read.score >= SUSPICIOUS_SCORE for read in reads)
     judge_result = None
     sandbox_report = None
-    # A rule that forces a verdict means the judge and sandbox would not change it.
-    if rules.forced_verdict is None:
-        snippets = [read.source for read in reads]
+    # A rule that forces a verdict, or a network or secrets action after a suspicious read
+    # (always denied), means the judge and sandbox would not change it.
+    if rules.forced_verdict is None and not suspicious_reads_blocking(rules.tags, reads):
+        snippets = [read.snippet for read in reads]
         prompt = _latest_prompt(conn, session.session_id)
         sandbox_session = SandboxSession(
             session_id=session.session_id,
@@ -94,11 +100,11 @@ async def decide(
         if _needs_sandbox(action, rules, config):
             sandbox_report = await asyncio.to_thread(runner.run, action, sandbox_session)
             # A fake secret was touched: combine denies whatever the judge would say.
-            if _needs_judge(action, rules, config) and not sandbox_report.tripwires_triggered:
+            if _needs_judge(action, rules, config, tainted) and not sandbox_report.tripwires_triggered:
                 judge_result = await judge.rate(
                     action, rules, snippets, prompt, sandbox_report, client=gemini
                 )
-        elif _needs_judge(action, rules, config):
+        elif _needs_judge(action, rules, config, tainted):
             judge_result = await judge.rate(action, rules, snippets, prompt, client=gemini)
             if _should_escalate(action, judge_result):
                 sandbox_report = await asyncio.to_thread(runner.run, action, sandbox_session)
@@ -109,7 +115,7 @@ async def decide(
         rules=rules,
         judge=judge_result,
         sandbox=sandbox_report,
-        tainted_by=[read.read_id for read in reads],
+        untrusted_reads=reads,
         config=config,
         remembered=decision_store.is_remembered(conn, action.action_id),
     )
@@ -121,12 +127,14 @@ def _needs_sandbox(action: StandardAction, rules: RuleResult, config: dict[str, 
     return action.kind == ActionKind.RUN_COMMAND and bool(sandbox_tags & set(rules.tags))
 
 
-def _needs_judge(action: StandardAction, rules: RuleResult, config: dict[str, Any]) -> bool:
+def _needs_judge(
+    action: StandardAction, rules: RuleResult, config: dict[str, Any], tainted: bool
+) -> bool:
     """Whether the judge is worth its cost: serious tags, or an untagged action of unknown effect."""
     if serious_tags(rules.tags, config):
         return True
     if rules.tags:
-        return False  # soft tags: the sandbox (if any) is enough
+        return tainted  # soft tags: the sandbox is enough, unless a suspicious read came first
     return action.kind in JUDGED_UNTAGGED_KINDS
 
 

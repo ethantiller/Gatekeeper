@@ -3,6 +3,9 @@ import binascii
 import re
 from urllib.parse import parse_qsl, urlsplit
 
+# A read scoring at least this is suspicious without asking the LLM (`scan` never scores higher).
+SUSPICIOUS_SCORE = 0.8
+
 _INSTRUCTION_PATTERNS = (
 
     # Patterns for detecting manipulative instruction phrases
@@ -64,26 +67,40 @@ _FINDING_WEIGHTS = {
 
 def scan(text: str) -> tuple[float, list[str]]:
     """Return a bounded heuristic score and names of detected patterns."""
-    findings: list[str] = []
-
-    if any(pattern.search(text) for pattern in _INSTRUCTION_PATTERNS):
-        findings.append("instruction_phrase")
-    if _HIDDEN_UNICODE_PATTERN.search(text):
-        findings.append("hidden_unicode")
-    if _HTML_COMMENT_PATTERN.search(text):
-        findings.append("hidden_html_comment")
-    if _contains_base64_blob(text):
-        findings.append("base64_blob")
-    if _FAKE_TOOL_CALL_PATTERN.search(text):
-        findings.append("fake_tool_call")
-    if _contains_suspicious_url_query(text):
-        findings.append("suspicious_url_query")
-
-    score = min(0.8, round(sum(_FINDING_WEIGHTS[finding] for finding in findings), 2))
+    findings = list(_find_offsets(text))
+    score = min(SUSPICIOUS_SCORE, round(sum(_FINDING_WEIGHTS[finding] for finding in findings), 2))
     return score, findings
 
 
-def _contains_base64_blob(text: str) -> bool:
+def finding_offsets(text: str) -> list[int]:
+    """Where in the text each finding starts, so a snippet can be centred on them."""
+    return list(_find_offsets(text).values())
+
+
+def _find_offsets(text: str) -> dict[str, int]:
+    """The first position of each finding, in the order `scan` reports them."""
+    offsets: dict[str, int] = {}
+    phrase_starts = [m.start() for p in _INSTRUCTION_PATTERNS if (m := p.search(text))]
+    if phrase_starts:
+        offsets["instruction_phrase"] = min(phrase_starts)
+    for finding, pattern in (
+        ("hidden_unicode", _HIDDEN_UNICODE_PATTERN),
+        ("hidden_html_comment", _HTML_COMMENT_PATTERN),
+        ("fake_tool_call", _FAKE_TOOL_CALL_PATTERN),
+    ):
+        match = pattern.search(text)
+        if match:
+            offsets[finding] = match.start()
+    for finding, offset in (
+        ("base64_blob", _base64_blob_offset(text)),
+        ("suspicious_url_query", _suspicious_url_query_offset(text)),
+    ):
+        if offset is not None:
+            offsets[finding] = offset
+    return {finding: offsets[finding] for finding in _FINDING_WEIGHTS if finding in offsets}
+
+
+def _base64_blob_offset(text: str) -> int | None:
     for match in _BASE64_TOKEN_PATTERN.finditer(text):
         token = match.group()
         padded_token = token + "=" * (-len(token) % 4)
@@ -92,11 +109,11 @@ def _contains_base64_blob(text: str) -> bool:
         except (binascii.Error, ValueError):
             continue
         if decoded:
-            return True
-    return False
+            return match.start()
+    return None
 
 
-def _contains_suspicious_url_query(text: str) -> bool:
+def _suspicious_url_query_offset(text: str) -> int | None:
     for match in _URL_PATTERN.finditer(text):
         url = match.group().rstrip(".,;:!?)]}")
         try:
@@ -105,7 +122,7 @@ def _contains_suspicious_url_query(text: str) -> bool:
             continue
         for key, value in query_items:
             if key.casefold() in _SUSPICIOUS_QUERY_KEYS:
-                return True
+                return match.start()
             if _SUSPICIOUS_QUERY_VALUE_PATTERN.search(value):
-                return True
-    return False
+                return match.start()
+    return None

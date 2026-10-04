@@ -35,6 +35,17 @@
 					}
 				]
 			}
+		],
+        "PostToolUse": [
+			{
+				"matcher": "^(Bash|Write|Edit|Read|WebFetch|mcp__gatekeeper__fixture_echo)$",
+				"hooks": [
+					{
+						"type": "command",
+						"command": "curl --silent --show-error --fail --max-time 5 --request POST --header 'Content-Type: application/json' --header \"X-Gatekeeper-Token: $(cat ~/.gatekeeper/token)\" --data-binary @- http://127.0.0.1:8787/hooks/claude/after-tool"
+					}
+				]
+			}
 		]
 	}
 }

@@ -15,7 +15,8 @@ gatekeeper/
 │   ├── config.py                   # reads ~/.gatekeeper/config.toml (GK-1)
 │   ├── database.py                 # SQLite connection, WAL mode, runs migrations (GK-1)
 │   ├── migrations/
-│   │   └── 0001_initial.sql        # the five tables: sessions, prompts, untrusted_reads, decisions, checkpoints (GK-1)
+│   │   ├── 0001_initial.sql        # the five tables: sessions, prompts, untrusted_reads, decisions, checkpoints (GK-1)
+│   │   └── 0004_untrusted_snippets.sql  # sequence, score and snippet on untrusted_reads (GK-8)
 │   ├── server/
 │   │   ├── types.py                # shared Pydantic types (GK-1)
 │   │   ├── main.py                 # server startup and route mounting (GK-1)
@@ -37,7 +38,9 @@ gatekeeper/
 │   │   ├── rules.py                # loads rules files, tags actions (GK-5)
 │   │   ├── untrusted.py            # records and looks up untrusted reads (GK-8)
 │   │   ├── scanner.py              # finds hidden instructions in text (GK-8)
-│   │   ├── rate_action_risk.py     # LLM risk rating (GK-5)
+│   │   ├── scanner_llm_review.py   # LLM second look at ambiguous scanner scores (GK-8)
+│   │   ├── judge.py                # builds the judge input and catches judge failures (GK-5)
+│   │   ├── rate_action_risk.py     # LLM risk rating request (GK-5)
 │   │   ├── combine.py              # if/else that produces the final verdict (GK-5)
 │   │   └── useless_mode.py         # sarcastic question generation (GK-10)
 │   ├── sandbox/

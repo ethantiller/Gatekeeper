@@ -5,7 +5,8 @@ from fastapi import APIRouter, Request
 
 from gatekeeper.core import decision_store
 from gatekeeper.core.sessions import count_action
-from gatekeeper.server.hooks.actions import ToolPayload, action_id_for
+from gatekeeper.server.hooks.actions import action_id_for
+from gatekeeper.server.hooks.after_tool.payload import AfterToolPayload
 from gatekeeper.server.hooks.after_tool.scan import scan_tool_output
 from gatekeeper.server.hooks.client import HookClient
 from gatekeeper.server.types import Verdict
@@ -13,22 +14,22 @@ from gatekeeper.server.types import Verdict
 router = APIRouter()
 
 
-class AfterToolPayload(ToolPayload):
-    tool_response: Any = None
-
-
 # async so handlers run one at a time on the event loop and share the one SQLite connection safely.
 @router.post("/after-tool")
 async def after_tool(
     client: HookClient, payload: AfterToolPayload, request: Request
 ) -> dict[str, Any]:
-    """Count the finished tool call, record a Claude approval, and scan the tool's output."""
+    """Count the finished tool call, record a Claude approval, and scan the tool's output.
+
+    Replies a block with a warning when the output looks like instructions to the agent.
+    """
     connection = request.app.state.conn
-    count_action(connection, payload.session_id, payload.cwd, client.source)
+    session, sequence = count_action(connection, payload.session_id, payload.cwd, client.source)
     if client == HookClient.CLAUDE:
         _record_approval_if_asked(connection, payload)
-    scan_tool_output(payload.session_id, payload.tool_name, payload.tool_response)
-    return {}
+    return await scan_tool_output(
+        connection, request.app.state.gemini, payload, session.repo_root, sequence
+    )
 
 
 def _record_approval_if_asked(connection: sqlite3.Connection, payload: AfterToolPayload) -> None:
