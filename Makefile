@@ -9,3 +9,5 @@ status-env:
 stop-env:
 	uv run python -m gatekeeper.sandbox.environment down
 
+start-dashboard:
+	uv run python -m gatekeeper.demo.server

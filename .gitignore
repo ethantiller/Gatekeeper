@@ -13,6 +13,7 @@ dist/
 CLAUDE.md
 AGENTS.md
 fixtures/
+node_modules
 
 .github/agents/
 /AGENTS.md
