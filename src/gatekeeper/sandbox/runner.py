@@ -41,6 +41,7 @@ from gatekeeper.sandbox.repo_images import (
     ready_repo_image,
     repo_image_status,
 )
+from gatekeeper.sandbox.saved_changes import CaptureOutcome, capture_changes
 from gatekeeper.sandbox.strace_log import (
     TRACED_CHANGE_SYSCALLS,
     TRACED_SYSCALLS,
@@ -189,6 +190,14 @@ def _run_in_container(
             _delete_removed_files(sandbox_container, changes.deleted_paths)
         workdir = _existing_workdir(sandbox_container, workdir, warnings)
         observation = _observe_run(client, sandbox_container, command, workdir)
+        saved = capture_changes(
+            sandbox_container,
+            WORKSPACE,
+            session.repo_root,
+            written_paths=observation.files_created + observation.files_modified,
+            deleted_paths=observation.files_deleted,
+            secret_values=list(generate_tripwire_values(session.tripwire_seed).values()),
+        )
         # Read while the values are still registered: late events can still be scanned.
         records = _read_settled_log(started_at, client_ip, observation.strace_log, warnings)
     except ImageNotFound as exc:
@@ -206,6 +215,7 @@ def _run_in_container(
             records=records,
             run_label=run_label,
             tripwire_seed=session.tripwire_seed,
+            saved=saved,
             warnings=warnings,
         )
     )
@@ -353,6 +363,7 @@ class _RunEvidence:
     records: list[dict]
     run_label: str
     tripwire_seed: str
+    saved: CaptureOutcome
     warnings: list[str]
 
 
@@ -407,6 +418,7 @@ def _build_report(evidence: _RunEvidence) -> SandboxReport:
         files_deleted=observation.files_deleted,
         network_attempts=_hosts(evidence.records) + direct,
         tripwires_triggered=_tripwire_hits(findings, evidence.records, evidence.run_label),
+        saved_changes_id=evidence.saved.change_id,
         notes=evidence.warnings + _run_warnings(evidence),
     )
 
@@ -450,6 +462,8 @@ def _run_warnings(evidence: _RunEvidence) -> list[str]:
     # Through the proxy, DNS is only used to find the proxy itself, so that alone proves nothing.
     if findings.used_dns and not findings.used_proxy:
         warnings.append("Looked up a hostname without going through the proxy, so the name was not logged.")
+    if evidence.saved.skipped_reason:
+        warnings.append(f"The changes were not saved: {evidence.saved.skipped_reason}.")
     return warnings
 
 

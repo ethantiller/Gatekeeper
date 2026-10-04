@@ -43,6 +43,7 @@ gatekeeper/
 │   ├── sandbox/
 │   │   ├── repo_images.py          # builds and caches repo images (GK-4)
 │   │   ├── runner.py               # runs a command in a container (GK-4)
+│   │   ├── saved_changes.py        # keeps and applies the files a run changed (GK-4)
 │   │   ├── environment.py          # builds/manages base image, network, logger (GK-2)
 │   │   └── tripwires.py            # per-session fake secret values (GK-2)
 │   └── cli/
@@ -104,6 +105,8 @@ Tests: `uv run pytest`. `tests/test_sandbox_network.py` needs a running Docker d
 **Running a command** (GK-4): `sandbox.runner.run(action, session)` copies the repo (minus gitignored files), the fake secrets and the logger CA into a throwaway container on `gk-sandbox`, runs `action.command` under `strace` with a 30 s timeout, and returns a `SandboxReport`. Try it with `uv run python -m gatekeeper.cli.dev "<command>"` (to be `gatekeeper sandbox-test`).
 
 **Repo image** (`sandbox/repo_images.py`): `start_repo_image_build(repo_root)` builds `gatekeeper-repo:<hash>` in the background from `git archive HEAD`, with dependencies installed from `package-lock.json`, `pnpm-lock.yaml` or `uv.lock` (npm and pnpm with `--ignore-scripts`, because the build has network access). The tag is a hash of the repo path and the lockfile at HEAD; an existing image is reused. When it is ready, `run()` starts from it and copies in only the files that differ from the image's commit (`git diff` plus untracked files). `.devcontainer` is not used: its commands would run repo-controlled code with network access outside the sandbox.
+
+**Saved changes** (`sandbox/saved_changes.py`): after a run, the created and modified files are archived from the container and `SandboxReport.saved_changes_id` names them (stored under `~/.gatekeeper/saved_changes/`, or `GATEKEEPER_SAVED_CHANGES`). `apply_saved_changes(id, repo_root)` applies exactly those files and deletions, but refuses if any host file changed since the run (`SavedChangesDriftError`; `check_drift` is the read-only check). The tar comes from an untrusted command, so only files, folders and symlinks inside the repo are accepted, and never anything under `.git`. Call `discard_saved_changes(id)` after a denial. Changes over 200 MB are not saved.
 
 **strace** works as user `sandbox` with `cap_drop=["ALL"]` and no extra capabilities (tested on Docker 29.4.1).
 

@@ -9,6 +9,7 @@ import typer
 
 from gatekeeper.sandbox.repo_images import build_repo_image
 from gatekeeper.sandbox.runner import run
+from gatekeeper.sandbox.saved_changes import discard_saved_changes
 from gatekeeper.server.types import (
     ActionKind,
     ActionSource,
@@ -38,6 +39,7 @@ def _print_report(report: SandboxReport) -> None:
     _print_list("files deleted", report.files_deleted)
     _print_list("hosts contacted", report.network_attempts)
     _print_list("tripwires triggered", report.tripwires_triggered)
+    print(f"saved changes: {report.saved_changes_id or 'none'}")
     _print_list("notes", report.notes)
     print("--- stdout (tail) ---")
     print(report.stdout_tail)
@@ -76,6 +78,8 @@ def sandbox_test(
     )
     report = run(action, session)
     _print_report(report)
+    if report.saved_changes_id:
+        discard_saved_changes(report.saved_changes_id)  # a test run must not leave state behind
     raise typer.Exit(1 if report.error else 0)
 
 

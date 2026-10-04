@@ -1,4 +1,4 @@
-"""Runner setup and cleanup, the cached Docker client and the reaper.
+"""Runner setup and cleanup, the cached Docker client, the reaper and streamed saved changes.
 
 None of these need Docker: the Docker objects are small fakes.
 """
@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from gatekeeper.sandbox import environment, runner
+from gatekeeper.sandbox import environment, runner, saved_changes
 from gatekeeper.sandbox.environment import SandboxEnvironmentError
 from gatekeeper.sandbox.runner import (
     _list_repo_files,
@@ -181,3 +181,35 @@ def test_a_running_but_unhealthy_logger_is_not_ok(status: str, health: str | Non
 
 def test_missing_logger_state() -> None:
     assert environment._logger_state(None) == "missing"
+def test_file_hashes_inside_folders_use_the_cheap_fingerprint(tmp_path: Path) -> None:
+    folder = tmp_path / "node_modules"
+    folder.mkdir()
+    (folder / "a.js").write_text("one")
+    (tmp_path / "file.txt").write_text("two")
+
+    hashes = saved_changes._host_hashes(tmp_path, ["node_modules", "file.txt", "missing"])
+    assert hashes["node_modules"] == saved_changes.DIRECTORY_HASH
+    assert hashes["node_modules/a.js"].startswith("stat:")
+    assert len(hashes["file.txt"]) == 64  # named files still get a full sha256
+    assert hashes["missing"] is None
+
+    (folder / "a.js").write_text("changed!")
+    assert saved_changes._host_hashes(tmp_path, ["node_modules"]) != {
+        key: hashes[key] for key in ("node_modules", "node_modules/a.js")
+    }
+
+
+def test_secret_split_across_read_chunks_is_still_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(saved_changes, "HASH_CHUNK_BYTES", 8)
+    secret = "FAKE-SECRET-VALUE"
+    content = b"x" * 5 + secret.encode() + b"y" * 5
+    source = tmp_path / "file.txt"
+    source.write_bytes(content)
+    archive_path = tmp_path / "changes.tar"
+    with tarfile.open(archive_path, "w") as archive:
+        archive.add(source, arcname="file.txt")
+
+    assert saved_changes._contains_secret(archive_path, [secret])
+    assert not saved_changes._contains_secret(archive_path, ["not-in-the-file"])

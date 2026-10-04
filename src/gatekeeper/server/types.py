@@ -215,6 +215,10 @@ class SandboxReport(GatekeeperModel):
         default_factory=list,
         description="Fake secrets (planted .env, AWS creds) that the command read or sent out",
     )
+    saved_changes_id: str | None = Field(
+        default=None,
+        description="Id of the saved file changes an approval can apply; None if nothing to save",
+    )
     notes: list[str] = Field(
         default_factory=list,
         description="Limits on this report (e.g. the connection log was unavailable); "
