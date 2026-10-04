@@ -1,5 +1,6 @@
 import json
 
+from google import genai
 from google.genai import types
 
 from gatekeeper.client.gemini_client import generate_structured_response
@@ -15,6 +16,7 @@ async def review_ambiguous_scan(
 	findings: list[str],
 	*,
 	model: str | None = None,
+	client: genai.Client | None = None,
 ) -> ScannerLLMReviewResult | None:
 
 	# Review ambiguous scan results only if the score is within the defined range
@@ -23,6 +25,7 @@ async def review_ambiguous_scan(
 
 	contents = _build_review_contents(text, score, findings)
 	return await generate_structured_response(
+		client,
 		contents,
 		_review_response_schema(),
 		ScannerLLMReviewResult.model_validate_json,
