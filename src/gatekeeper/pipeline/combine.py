@@ -106,28 +106,33 @@ def _reasons_to_ask(
     reasons: list[str] = []
     tags = rules.tags if rules is not None else []
 
-    if judge is None or judge.error is not None:
-        detail = judge.error if judge is not None else "no judge result"
-        reasons.append(f"The judge was unavailable ({detail})")
+    serious = serious_tags(tags, config)
+
+    # The judge only runs when needed, so no result is fine unless a serious tag needs one.
+    if judge is None:
+        if serious:
+            reasons.append(f"Needs a judge review ({', '.join(serious)}) but none ran")
+    elif judge.error is not None:
+        reasons.append(f"The judge was unavailable ({judge.error})")
     elif judge.risk == RiskLevel.HIGH:
         reasons.append(f"The judge rated this high risk: {judge.reasoning}")
-    elif judge.risk == RiskLevel.MEDIUM and (tags or tainted_by):
+    elif judge.risk == RiskLevel.MEDIUM and tainted_by:
         reasons.append(f"The judge rated this medium risk: {judge.reasoning}")
 
-    review_tags = sorted(set(tags) - set(config.get("auto_allow_tags", [])))
-    if review_tags:
-        reasons.append(f"Flagged by rules: {', '.join(review_tags)}")
-    if tainted_by and review_tags:
-        reasons.append("The agent read untrusted content earlier, and this action is tagged risky")
+    if tainted_by and serious:
+        reasons.append("The agent read untrusted content earlier, and this action is tagged serious")
 
     if sandbox is not None:
-        reasons.extend(_sandbox_concerns(action, sandbox, config))
+        reasons.extend(_sandbox_concerns(action, sandbox, config, notes_matter=bool(serious)))
     return reasons
 
 
 def _sandbox_concerns(
-    action: StandardAction, sandbox: SandboxReport, config: dict[str, Any]
+    action: StandardAction, sandbox: SandboxReport, config: dict[str, Any], notes_matter: bool
 ) -> list[str]:
+    """What the sandbox found. Its notes (missing repo image, host paths it could not copy,
+    ...) only mean incomplete evidence, which matters for serious actions but not for the
+    ones that are allowed without any sandbox run."""
     if sandbox.error is not None:
         return [f"The sandbox could not run this: {sandbox.error}"]
 
@@ -152,6 +157,12 @@ def _sandbox_concerns(
     if sensitive:
         concerns.append(f"It changes protected or agent config files: {', '.join(sensitive[:5])}")
 
-    if sandbox.notes:
+    if sandbox.notes and notes_matter:
         concerns.append(f"The sandbox report has limits: {'; '.join(sandbox.notes)}")
     return concerns
+
+
+def serious_tags(tags: list[str], config: dict[str, Any]) -> list[str]:
+    """The tags that need the judge: configured serious tags the user has not auto-allowed."""
+    wanted = set(config.get("serious_tags", [])) - set(config.get("auto_allow_tags", []))
+    return sorted(set(tags) & wanted)

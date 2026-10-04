@@ -1,10 +1,18 @@
+import logging
+import threading
+from pathlib import Path
 from typing import Any
 
+from docker.errors import DockerException
 from fastapi import APIRouter, Request
 
 from gatekeeper.core.sessions import ensure_session
+from gatekeeper.sandbox.environment import SandboxEnvironmentError
+from gatekeeper.sandbox.repo_images import start_repo_image_build
 from gatekeeper.server.hooks.client import HookClient
 from gatekeeper.server.hooks.payload import HookPayload
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -14,13 +22,25 @@ CONTEXT = (
 )
 
 
+def _start_image_build(repo_root: Path) -> None:
+    """Build the repo's sandbox image in the background; without it, runs use the base image."""
+    try:
+        start_repo_image_build(repo_root)
+    except (SandboxEnvironmentError, DockerException) as error:
+        logger.warning("Could not start the repo image build for %s: %s", repo_root, error)
+
+
 # async so handlers run one at a time on the event loop and share the one SQLite connection safely.
 @router.post("/session-start")
 async def session_start(
     client: HookClient, payload: HookPayload, request: Request
 ) -> dict[str, Any]:
     """Create or refresh the session. Every source (startup, resume, compact, clear) is the same."""
-    ensure_session(request.app.state.conn, payload.session_id, payload.cwd, client.source)
+    repo_root = ensure_session(
+        request.app.state.conn, payload.session_id, payload.cwd, client.source
+    )
+    # On a thread: finding the build plan asks git and Docker, which must not delay the reply.
+    threading.Thread(target=_start_image_build, args=(Path(repo_root),), daemon=True).start()
     return {
         "hookSpecificOutput": 
         {
