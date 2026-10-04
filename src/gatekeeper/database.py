@@ -2,11 +2,17 @@
 
 import os
 import sqlite3
+import threading
 from importlib import resources
 from pathlib import Path
 
 DEFAULT_DB_PATH = Path.home() / ".gatekeeper" / "gatekeeper.db"
 MIGRATIONS = resources.files("gatekeeper") / "migrations"
+
+# SQLite tracks the open transaction per connection, not per thread. Handlers share one
+# connection across the threadpool, so any handler that writes holds this lock for the whole
+# `with connection:` block; otherwise one request can commit or roll back another's writes.
+CONNECTION_LOCK = threading.Lock()
 
 
 def connect(path: Path | None = None) -> sqlite3.Connection:
