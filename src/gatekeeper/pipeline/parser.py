@@ -12,6 +12,7 @@ import bashlex
 from gatekeeper.server.types import ParsedCommand, StandardAction
 
 _REDIRECT_OUTPUT_TYPES = {">", ">>", ">|", "&>", "&>>"}
+_FILE_REDIRECT_TYPES = {"<", "<>", *_REDIRECT_OUTPUT_TYPES}
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
@@ -34,11 +35,15 @@ def parse(action: StandardAction) -> ParsedCommand:
 
     try:
         roots = bashlex.parse(raw)
-    except (bashlex.errors.ParsingError, bashlex.tokenizer.MatchedPairError) as error:
+    except (
+        bashlex.errors.ParsingError,
+        bashlex.tokenizer.MatchedPairError,
+        NotImplementedError,
+    ) as error:
         return result.model_copy(update={"parse_error": str(error)})
 
     state = _ParseState()
-    for node in _walk(roots):
+    for node in _walk_ast_nodes(roots):
         kind = getattr(node, "kind", None)
         if kind == "command":
             _handle_command(node, state)
@@ -63,8 +68,7 @@ def parse(action: StandardAction) -> ParsedCommand:
 
 
 def _handle_command(node: Any, state: _ParseState) -> None:
-    words = [part for part in getattr(node, "parts", ()) if getattr(part, "kind", None) == "word"]
-    command_argv = [str(word.word) for word in words]
+    command_argv = _command_arguments(node)
     if not command_argv:
         return
 
@@ -103,8 +107,59 @@ def _handle_redirect(node: Any, state: _ParseState) -> None:
         state.redirect_targets.append(str(target.word))
 
 
+# Return command argv grouped by the actual pipeline each belongs to.
+def extract_pipeline_commands(raw: str) -> list[list[list[str]]]:
+    if not raw.strip():
+        return []
+
+    try:
+        roots = bashlex.parse(raw)
+    except (bashlex.errors.ParsingError, bashlex.tokenizer.MatchedPairError, NotImplementedError):
+        return []
+
+    pipelines: list[list[list[str]]] = []
+    for node in _walk_ast_nodes(roots):
+        if getattr(node, "kind", None) != "pipeline":
+            continue
+        stages = [
+            _command_arguments(part)
+            for part in getattr(node, "parts", ())
+            if getattr(part, "kind", None) == "command"
+        ]
+        if len(stages) > 1:
+            pipelines.append(stages)
+    return pipelines
+
+
+# Return the file path used by input or output redirections.
+def extract_redirect_paths(raw: str) -> list[str]:
+    if not raw.strip():
+        return []
+
+    try:
+        roots = bashlex.parse(raw)
+    except (bashlex.errors.ParsingError, bashlex.tokenizer.MatchedPairError, NotImplementedError):
+        return []
+
+    paths: list[str] = []
+    for node in _walk_ast_nodes(roots):
+        if getattr(node, "kind", None) != "redirect":
+            continue
+        if getattr(node, "type", None) not in _FILE_REDIRECT_TYPES:
+            continue
+        target = getattr(node, "output", None)
+        if getattr(target, "kind", None) == "word":
+            paths.append(str(target.word))
+    return paths
+
+
+def _command_arguments(node: Any) -> list[str]:
+    words = [part for part in getattr(node, "parts", ()) if getattr(part, "kind", None) == "word"]
+    return [str(word.word) for word in words]
+
+
+# Extract HTTP(S) hostnames from a parsed command or a direct URL action.
 def extract_hosts(parsed: ParsedCommand, url: str | None = None) -> list[str]:
-    """Extract HTTP(S) hostnames from a parsed command or a direct URL action."""
     hosts: list[str] = []
     candidates = [url] if url else []
     candidates.extend(argument for command in parsed.argv for argument in command)
@@ -131,7 +186,9 @@ def _normalize_program(value: str) -> str:
         return program[: -len(suffix)]
 
     return program
-def _walk(roots: list[Any]) -> Iterator[Any]:
+
+# Walk the AST nodes in a depth-first manner, yielding each node exactly once.
+def _walk_ast_nodes(roots: list[Any]) -> Iterator[Any]:
     stack = list(reversed(roots))
     visited: set[int] = set()
     child_fields = ("parts", "list", "command", "redirects", "input", "output", "heredoc")

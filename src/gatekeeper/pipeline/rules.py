@@ -9,7 +9,12 @@ from typing import Any
 
 import yaml
 
-from gatekeeper.pipeline.parser import extract_hosts, parse
+from gatekeeper.pipeline.parser import (
+    extract_hosts,
+    extract_pipeline_commands,
+    extract_redirect_paths,
+    parse,
+)
 from gatekeeper.server.types import (
     ActionKind,
     ParsedCommand,
@@ -255,29 +260,29 @@ def _command_matches_prefix(entry: Any, argv: list[str]) -> bool:
 
 # Check if a base64 decode command is piped to a shell command
 def _is_base64_decode_piped_to_shell(parsed: ParsedCommand) -> bool:
-    if not parsed.has_pipe:
-        return False
-    decoder_index = None
-    for index, command in enumerate(parsed.argv):
-        if _program_name_from_argv(command) == "base64" and any(
-            argument in {"-d", "--decode", "-D"} for argument in command[1:]
-        ):
-            decoder_index = index
-        elif decoder_index is not None and _program_name_from_argv(command) in {"sh", "bash", "zsh", "dash"}:
-            return True
+    for pipeline in extract_pipeline_commands(parsed.raw):
+        decoder_seen = False
+        for command in pipeline:
+            program = _program_name_from_argv(command)
+            if program == "base64" and any(
+                argument in {"-d", "--decode", "-D"} for argument in command[1:]
+            ):
+                decoder_seen = True
+            elif decoder_seen and program in {"sh", "bash", "zsh", "dash"}:
+                return True
     return False
 
 
 # Check if a download command is piped to a shell command
 def _is_download_piped_to_shell(parsed: ParsedCommand) -> bool:
-    if not parsed.has_pipe:
-        return False
-    download_index = None
-    for index, command in enumerate(parsed.argv):
-        if _program_name_from_argv(command) in {"curl", "wget"}:
-            download_index = index
-        elif download_index is not None and _program_name_from_argv(command) in {"sh", "bash", "zsh", "dash"}:
-            return True
+    for pipeline in extract_pipeline_commands(parsed.raw):
+        download_seen = False
+        for command in pipeline:
+            program = _program_name_from_argv(command)
+            if program in {"curl", "wget"}:
+                download_seen = True
+            elif download_seen and program in {"sh", "bash", "zsh", "dash"}:
+                return True
     return False
 
 
@@ -287,6 +292,7 @@ def _collect_action_paths(action: StandardAction, parsed: ParsedCommand) -> list
     if action.path:
         paths.append(action.path)
     paths.extend(parsed.redirect_targets)
+    paths.extend(extract_redirect_paths(parsed.raw))
     paths.extend(argument for command in parsed.argv for argument in command[1:])
     return paths
 
@@ -306,8 +312,11 @@ def _path_matches_pattern(path: str, patterns: Any, cwd: str) -> bool:
     normalized_path = _normalize_path(path)
     candidates = {normalized_path}
     normalized_cwd = _normalize_path(cwd).rstrip("/")
-    if normalized_path.casefold().startswith(normalized_cwd.casefold() + "/"):
-        candidates.add(normalized_path[len(normalized_cwd) + 1 :])
+    if not Path(normalized_path).is_absolute():
+        candidates.add(_normalize_path(str(Path(cwd) / normalized_path)))
+    for candidate in tuple(candidates):
+        if candidate.casefold().startswith(normalized_cwd.casefold() + "/"):
+            candidates.add(candidate[len(normalized_cwd) + 1 :])
 
     for pattern in patterns if isinstance(patterns, list) else []:
         normalized_pattern = _normalize_path(str(pattern))
