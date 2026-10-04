@@ -1,5 +1,3 @@
-"""Load layered Gatekeeper rules and classify actions before review."""
-
 from __future__ import annotations
 
 import re
@@ -76,18 +74,39 @@ def check_action_against_rules(
     parsed = parsed or parse(action)
     config = load_rules(action.cwd) if rules is None else rules
 
+    denial = _never_allowed_result(config, action, parsed)
+    if denial is not None:
+        return denial
+
+    tags, reasons = _collect_action_risk_tags(config, action, parsed)
+    if tags:
+        return RuleResult(tags=sorted(tags), reasons=reasons)
+
+    return _safe_command_allow_result(config, parsed) or RuleResult()
+
+
+def _never_allowed_result(
+    config: dict[str, Any], action: StandardAction, parsed: ParsedCommand
+) -> RuleResult | None:
     matched_rules = [
         rule
         for rule in config.get("never_allowed", [])
         if _matches_never_allowed_rule(rule, action, parsed)
     ]
-    if matched_rules:
-        return RuleResult(
-            matched_rule_ids=[str(rule.get("id", "never-allowed")) for rule in matched_rules],
-            forced_verdict=Verdict.DENY,
-            reasons=[str(rule.get("reason", "Matched a never-allowed rule")) for rule in matched_rules],
-        )
+    if not matched_rules:
+        return None
 
+    return RuleResult(
+        matched_rule_ids=[str(rule.get("id", "never-allowed")) for rule in matched_rules],
+        forced_verdict=Verdict.DENY,
+        reasons=[str(rule.get("reason", "Matched a never-allowed rule")) for rule in matched_rules],
+    )
+
+
+# Collect risk tags for an action based on the configuration and the parsed command
+def _collect_action_risk_tags(
+    config: dict[str, Any], action: StandardAction, parsed: ParsedCommand
+) -> tuple[set[str], list[str]]:
     tags: set[str] = set()
     reasons: list[str] = []
     configured_tags = config.get("tags", {})
@@ -133,9 +152,13 @@ def check_action_against_rules(
         if "network" not in reasons:
             reasons.append("The action fetches a URL")
 
-    if tags:
-        return RuleResult(tags=sorted(tags), reasons=reasons)
+    return tags, reasons
 
+
+# Determine if a command should be allowed based on the safe commands configuration
+def _safe_command_allow_result(
+    config: dict[str, Any], parsed: ParsedCommand
+) -> RuleResult | None:
     safe_commands = config.get("safe_commands", [])
     if parsed.argv and not parsed.parse_error and all(
         any(_command_matches_prefix(entry, command) for entry in safe_commands)
@@ -146,7 +169,7 @@ def check_action_against_rules(
             reasons=["Every command matches the safe command list"],
         )
 
-    return RuleResult()
+    return None
 
 
 # Check for never allowed rules
