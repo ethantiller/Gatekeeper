@@ -406,6 +406,68 @@ def _collect_action_paths(action: StandardAction, parsed: ParsedCommand) -> list
     paths.extend(parsed.redirect_targets)
     paths.extend(extract_redirect_paths(parsed.raw))
     paths.extend(argument for command in parsed.argv for argument in command[1:])
+    paths.extend(
+        path
+        for command in parsed.argv
+        for path in _curl_upload_file_paths(command)
+    )
+    return paths
+
+
+def _curl_upload_file_paths(argv: list[str]) -> list[str]:
+    if _program_name_from_argv(argv) != "curl":
+        return []
+
+    file_options = {
+        "-d",
+        "--data",
+        "--data-ascii",
+        "--data-binary",
+        "--data-raw",
+        "--data-urlencode",
+        "-F",
+        "--form",
+    }
+    form_options = {"-F", "--form"}
+    paths: list[str] = []
+    index = 1
+    while index < len(argv):
+        argument = argv[index]
+        option = next(
+            (
+                candidate
+                for candidate in file_options
+                if argument == candidate or argument.startswith(f"{candidate}=")
+            ),
+            None,
+        )
+        if option is None:
+            index += 1
+            continue
+
+        if argument == option:
+            index += 1
+            if index >= len(argv):
+                break
+            value = argv[index]
+        else:
+            value = argument[len(option) + 1 :]
+
+        if option in form_options:
+            _, separator, value = value.partition("=@")
+            if separator:
+                value = value.split(";", 1)[0]
+                if value:
+                    paths.append(value)
+        elif value.startswith("@"):
+            if value[1:]:
+                paths.append(value[1:])
+        elif option == "--data-urlencode" and "@" in value:
+            path = value.split("@", 1)[1]
+            if path:
+                paths.append(path)
+
+        index += 1
     return paths
 
 

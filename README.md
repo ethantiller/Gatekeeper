@@ -37,7 +37,7 @@ gatekeeper/
 │   │   ├── rules.py                # loads rules files, tags actions (GK-5)
 │   │   ├── untrusted.py            # records and looks up untrusted reads (GK-8)
 │   │   ├── scanner.py              # finds hidden instructions in text (GK-8)
-│   │   ├── judge.py                # LLM risk rating (GK-5)
+│   │   ├── rate_action_risk.py     # LLM risk rating (GK-5)
 │   │   ├── combine.py              # if/else that produces the final verdict (GK-5)
 │   │   └── useless_mode.py         # sarcastic question generation (GK-10)
 │   ├── sandbox/

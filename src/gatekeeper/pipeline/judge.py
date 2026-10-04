@@ -5,7 +5,7 @@ from collections.abc import Sequence
 
 from google import genai
 
-from gatekeeper.client.gemini_client import rate_action_risk
+from gatekeeper.pipeline.rate_action_risk import request_judge_result
 from gatekeeper.server.types import (
     JudgeResult,
     RuleResult,
@@ -27,7 +27,7 @@ async def rate(
     client: genai.Client | None = None,
 ) -> JudgeResult:
     """Rate an action. Failures come back in `JudgeResult.error`, not as exceptions."""
-    return await rate_action_risk(
+    return await request_judge_result(
         describe_action(action, rules, sandbox),
         recent_untrusted_snippets=recent_untrusted_snippets,
         latest_prompt=latest_prompt,
