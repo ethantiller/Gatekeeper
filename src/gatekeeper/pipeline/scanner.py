@@ -1,12 +1,10 @@
-"""Heuristic scanning for hidden or manipulative instructions in text."""
-
 import base64
 import binascii
 import re
 from urllib.parse import parse_qsl, urlsplit
 
 _INSTRUCTION_PATTERNS = (
-    
+
     # Patterns for detecting manipulative instruction phrases
     re.compile(
         r"\b(?:ignore|disregard|forget|override)\s+(?:(?:all|any|the)\s+)?"
