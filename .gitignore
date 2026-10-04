@@ -21,3 +21,6 @@ fixtures/
 /fixtures/codex/*.json
 /fixtures/fixture_server.py
 /tests/
+
+*.pyc
+__pycache__/
