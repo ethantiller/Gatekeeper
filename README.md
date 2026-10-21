@@ -6,6 +6,8 @@ Gatekeeper sandboxes and checks risky actions from AI coding agents (Claude Code
 
 Files are created by the ticket that owns them. This is the target layout.
 
+[![Architecture diagram of ethantiller/gatekeeper](https://gitdiagram.com/ethantiller/gatekeeper/diagram.png)](https://gitdiagram.com/ethantiller/gatekeeper?utm_source=readme&utm_medium=picture)
+
 ```
 gatekeeper/
 ├── pyproject.toml
